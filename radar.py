@@ -172,7 +172,7 @@ def _extraer(tablas):
             return filas
     return []
 
-_NO_COMUNES = (r"\b(warrants?|rights?|preferred|pfd|perpetual|debentures?|subordinated|notes? due)\b"
+_NO_COMUNES = (r"\b(warrants?|rights?|preferred|pfd|perpetual|debentures?|subordinated|notes? due|etns?|exchange traded notes?)\b"
                r"|(?<!common )\bunits?\b|\d% |depositary shares,? each representing (a |one )?\d*/\d+")
 
 BOLSAS_TV = {"N": "NYSE", "A": "AMEX", "P": "AMEX", "Z": "CBOE", "V": "IEX"}  # código de NASDAQ Trader → prefijo de TradingView
