@@ -54,8 +54,19 @@ jobs:
           path: historial_top.json
           key: historial-${{ github.run_id }}
           restore-keys: historial-
+      - name: Recuperar historial de Seleccionadas y alertas enviadas
+        uses: actions/cache@v4
+        with:
+          path: |
+            historial_sel.json
+            alertas_enviadas.json
+          key: seleccionadas-${{ github.run_id }}
+          restore-keys: seleccionadas-
       - name: Correr el radar
         run: python radar.py
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

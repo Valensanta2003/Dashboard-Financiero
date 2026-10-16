@@ -6,3 +6,5 @@ sectores_cache.json
 .claude/
 fundamentales_cache.json
 historial_top.json
+historial_sel.json
+alertas_enviadas.json

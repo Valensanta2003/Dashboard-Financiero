@@ -35,6 +35,10 @@ EMAS_ASCENSO = "10, 20, 50"
 SEL_RS_MIN = 80
 SEL_MINERVINI_MIN = 7
 SEL_SCORE_MIN = 70
+SEL_HISTORIA_RUEDAS = 20  # track record: ingresos a Seleccionadas de las últimas N ruedas
+# **Alertas por Telegram** (el token y el chat van como secretos de GitHub, nunca acá)
+ALERTAS_TELEGRAM = True
+URL_DASHBOARD = "https://valensanta2003.github.io/Dashboard-Financiero/"
 # **Lista de foco y score**
 FOCO_MAXIMO = 10
 FOCO_RS_MINIMO = 80
@@ -1117,9 +1121,88 @@ def top_retorno(activos, fecha, spy):
     return {"nuevos": nuevos, "nuevos_desde": fechas[-2] if len(fechas) >= 2 else None, "ruedas": len(ventana), "desde": ventana[0] if ventana else fecha, "spy": r_spy,
             "medio": num(sum(rets) / len(rets), 2) if rets else None, "filas": filas}
 
+# ---------------------------------------------------------------- seleccionadas: track record y alertas
+ARCHIVO_SEL = "historial_sel.json"
+ARCHIVO_ALERTAS = "alertas_enviadas.json"
+
+def es_seleccionada(a):
+    return not a["sin_av"] and a["rs"] >= SEL_RS_MIN and a["mv"] >= SEL_MINERVINI_MIN and a["score"] >= SEL_SCORE_MIN
+
+def track_seleccionadas(activos, fecha, diario, spy):
+    """Guarda las Seleccionadas del día y mide el retorno de cada ingreso de las últimas SEL_HISTORIA_RUEDAS ruedas vs el SPY."""
+    try: hist = json.load(open(ARCHIVO_SEL))
+    except Exception: hist = {}
+    hist[fecha] = {a["t"]: a["precio"] for a in activos if es_seleccionada(a)}
+    fechas = sorted(hist)[-120:]
+    hist = {f: hist[f] for f in fechas}
+    try: json.dump(hist, open(ARCHIVO_SEL, "w"))
+    except Exception: pass
+    ventana = fechas[-SEL_HISTORIA_RUEDAS:]
+    hoy = set(hist[fecha])
+    filas = []
+    for k, f in enumerate(ventana):
+        previo = set(hist[ventana[k - 1]]) if k > 0 else set(hist[fechas[fechas.index(f) - 1]]) if fechas.index(f) > 0 else set()
+        for t, px in hist[f].items():
+            if t in previo or not px: continue  # solo el día que entró
+            d = diario.get(t)
+            if d is None: continue
+            ahora = float(d.Close.iloc[-1])
+            r_spy = None
+            if spy is not None:
+                ini = spy[spy.index <= pd.Timestamp(f)]
+                if len(ini): r_spy = num((spy.iloc[-1] / ini.iloc[-1] - 1) * 100, 2)
+            filas.append({"t": t, "entro": f, "px": num(px, 2), "ahora": num(ahora, 2), "ret": num((ahora / px - 1) * 100, 2),
+                          "spy": r_spy, "sigue": t in hoy})
+    rets = [x["ret"] for x in filas]; spys = [x["spy"] for x in filas if x["spy"] is not None]
+    viejas = [x["ret"] for x in filas if x["entro"] < fecha]  # las que entraron hoy todavía no tienen resultado
+    gan = sum(1 for x in viejas if x > 0)
+    return {"ruedas": len(ventana), "desde": ventana[0] if ventana else fecha, "n": len(filas),
+            "medio": num(sum(rets) / len(rets), 2) if rets else None, "spy": num(sum(spys) / len(spys), 2) if spys else None,
+            "aciertos": num(gan / len(viejas) * 100, 0) if viejas else None,
+            "filas": sorted(filas, key=lambda x: x["entro"], reverse=True)[:40]}
+
+def alertas_telegram(activos, fecha):
+    """Manda por Telegram las Seleccionadas que hoy rompen su pivot VCP o su AVWAP con volumen (una vez por día y ticker)."""
+    import os, requests
+    token = os.environ.get("TELEGRAM_TOKEN", "").strip()
+    if not ALERTAS_TELEGRAM or not token: return 0
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    api = f"https://api.telegram.org/bot{token}"
+    try:
+        if not chat:
+            # Sin chat configurado: se usa el último chat que le escribió al bot
+            res = requests.get(api + "/getUpdates", timeout=20).json().get("result", [])
+            chats = [u.get("message", {}).get("chat", {}).get("id") for u in res if u.get("message")]
+            chat = str(chats[-1]) if chats and chats[-1] else ""
+        if not chat:
+            print("   ⚠️ Telegram: mandale cualquier mensaje al bot para que sepa a qué chat escribir"); return 0
+        try: env = json.load(open(ARCHIVO_ALERTAS))
+        except Exception: env = {}
+        env = {k: v for k, v in env.items() if v >= (dt.date.today() - dt.timedelta(days=10)).isoformat()}
+        msgs = []
+        for a in activos:
+            if not es_seleccionada(a): continue
+            v, s_ = a.get("vcp"), (a.get("setup_av") or {}).get("d")
+            motivo = None
+            if v and v["estado"] == "recien" and (v.get("vol_rup") or 0) >= VOL_RUPTURA:
+                motivo = f"rompió el pivot VCP {v['pivot']:.2f} con {v['vol_rup']:.1f}x de volumen"
+            elif s_ and s_["estado"] == "rompe":
+                motivo = f"rompió la AVWAP {s_['ancla'].lower()} (entrada {s_['entrada']:.2f}, stop {s_['stop']:.2f})"
+            clave = f"{fecha}:{a['t']}"
+            if motivo and clave not in env:
+                msgs.append(f"🚀 <b>{a['t']}</b> {motivo}\nScore {a['score']:.0f} · RS {a['rs']:.0f} · {a['mv']}/8 · ${a['precio']:.2f}")
+                env[clave] = fecha
+        for m in msgs:
+            requests.post(api + "/sendMessage", timeout=20, data={"chat_id": chat, "parse_mode": "HTML", "disable_web_page_preview": "true",
+                                                                 "text": m + f"\n<a href=\"{URL_DASHBOARD}\">Abrir dashboard</a>"})
+        json.dump(env, open(ARCHIVO_ALERTAS, "w"))
+        return len(msgs)
+    except Exception as e:
+        print(f"   ⚠️ Telegram: {e}"); return 0
+
 # ---------------------------------------------------------------- rotación (cuadrantes tipo RRG)
-def rotacion(diario, etfs):
-    """RS (percentil del universo) de cada ETF en las últimas ROTACION_SEMANAS + 1 semanas, de la más vieja a la más nueva."""
+def rs_semanas(diario):
+    """RS (percentil del universo) de cada activo en las últimas ROTACION_SEMANAS + 1 semanas, de la más vieja a la más nueva."""
     sem = ROTACION_SEMANAS + 1
     arr = {t: df.Close.values for t, df in diario.items() if len(df) >= 60}
     def rsb(c, e):
@@ -1129,6 +1212,12 @@ def rotacion(diario, etfs):
     for k in range(sem - 1, -1, -1):
         crudo = {t: rsb(c, len(c) - 1 - 5 * k) for t, c in arr.items() if len(c) - 1 - 5 * k >= 60}
         por_semana.append(pd.Series(crudo).rank(pct=True) * 98 + 1)
+    return por_semana
+
+def rotacion(diario, etfs, por_semana):
+    """Series de RS semanal de cada ETF para los cuadrantes."""
+    sem = len(por_semana)
+    arr = {t for t, df in diario.items() if len(df) >= 60}
     ref = diario.get("SPY")
     fechas = [ref.index[-1 - 5 * k].strftime("%d-%m") for k in range(sem - 1, -1, -1)] if ref is not None and len(ref) > 5 * sem else []
     out = []
@@ -1308,6 +1397,12 @@ def correr():
         d = diario.get(etf) if etf else None
         a["etf"] = {"t": etf, "rs": num(rs_pct.get(etf), 0) if etf in rs_pct.index else None,
                     "chg": num((d.Close.iloc[-1] / d.Close.iloc[-2] - 1) * 100) if d is not None and len(d) > 1 else None} if etf else None
+        if a["etf"] and d is not None:
+            c_a = diario[a["t"]].Close
+            ret = lambda c, n: (c.iloc[-1] / c.iloc[-n - 1] - 1) * 100 if len(c) > n else None
+            for n, k in ((21, "vs1m"), (63, "vs3m")):
+                x, y = ret(c_a, n), ret(d.Close, n)
+                a["etf"][k] = num(x - y, 1) if x is not None and y is not None else None
     n_req = sum(1 for a in activos if not a["sin_av"])
     embudo.append(("Cumplen todo", n_req))
     print(f"   {n_req} cumplen todos los requisitos")
@@ -1342,13 +1437,19 @@ def correr():
     top = top_retorno(activos, fecha_iso, spy_c)
     nombres = {t: str((perf.get(t) or {}).get("nombre") or info.at[t, "nombre"]) for t in liquidas}
     cart = cartelera(diario, liquidas, nombres)
-    rot = rotacion(diario, ETFS) if INCLUIR_ETFS else None
+    por_semana = rs_semanas(diario)
+    rot = rotacion(diario, ETFS, por_semana) if INCLUIR_ETFS else None
+    for a in activos:
+        a["rs16"] = [num(x.get(a["t"]), 0) if a["t"] in x.index else None for x in por_semana]
+    selh = track_seleccionadas(activos, fecha_iso, diario, spy_c)
+    n_al = alertas_telegram(activos, fecha_iso)
+    print(f"   Seleccionadas: {sum(es_seleccionada(a) for a in activos)} · alertas enviadas: {n_al}")
     print(f"   Top {TOP_N}: {top['medio']}% promedio en {top['ruedas']} ruedas vs SPY {top['spy']}%")
     print(f"   Lista de foco: {len(foco)}")
     fechas = [df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto"] or [hoy]
     datos = {"meta": {
         "fecha_datos": max(fechas).strftime("%d-%m-%Y"), "generado": ahora_ar().strftime("%d-%m-%Y %H:%M"),
-        "n_universo": len(diario), "top": top, "cartelera": cart, "rotacion": rot, "nombre": NOMBRE_DASHBOARD, "lema": LEMA, "avatar": AVATAR_URL, "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
+        "n_universo": len(diario), "top": top, "selh": selh, "cartelera": cart, "rotacion": rot, "nombre": NOMBRE_DASHBOARD, "lema": LEMA, "avatar": AVATAR_URL, "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
         "params": {"min_mv": MIN_CRITERIOS_MINERVINI, "sobre_min": PCT_SOBRE_MINIMO_52S, "sobre_min_etf": PCT_SOBRE_MINIMO_52S_ETF, "bajo_max": PCT_DEBAJO_MAXIMO_52S,
                    "rs_min": RS_MINIMO, "precio_min": PRECIO_MINIMO, "exigir_av": EXIGIR_AVWAP,
                    "dist_d": DIST_POR_ROMPER_DIARIO, "dist_w": DIST_POR_ROMPER_SEMANAL,
@@ -1496,7 +1597,7 @@ h2.sec small{color:var(--muted);font-family:var(--ui);text-transform:none;letter
 .tc{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700;color:var(--warn);background:rgba(244,183,64,.14);white-space:nowrap}
 .ins{display:inline-block;padding:1px 6px;border-radius:6px;font-size:11.5px;font-weight:700;color:var(--blue);background:rgba(110,168,254,.14);white-space:nowrap}
 .tc.ok{color:var(--up);background:var(--accsoft)}
-.tbigs{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:12px;margin-bottom:12px}
+.tbigs{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));border:1px solid var(--line);border-radius:12px;margin-bottom:12px}
 .tbig{padding:14px 16px;text-align:center}.tbig+.tbig{border-left:1px solid var(--line)}
 .tbig span{display:block;font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--warn)}
 .tbig+.tbig span{color:var(--blue)}
@@ -1940,7 +2041,20 @@ function vInicio(){
   ];
   const selH = `<div class="foco">${card('Seleccionadas', `${sel.length} · RS ${SL.rs}+, ${SL.mv}/8 o más y score ${SL.score}+`,
     tabla(cSel, sel.map((a,i)=>({a,i})), 'Ninguna cumple los tres filtros hoy.'))}</div>`;
-  return `${foco}${selH}${topH}<div class="grid inicio">${reg}${kpis}</div><div class="grid g2" style="margin-top:18px">${nuevos}${cart}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
+  const H = D.meta.selh;
+  const trackH = H ? `<div class="foco">${card('Track record de Seleccionadas', `ingresos de las últimas ${H.ruedas} ${H.ruedas===1?'rueda':'ruedas'}`,
+    `<div class="tbigs">${['Retorno medio','SPY mismo período','Positivas'].map((t,i)=>`<div class="tbig"><span>${t}</span><b class="${i<2?cls([H.medio,H.spy][i]):''}">${i<2?pct([H.medio,H.spy][i]):(H.aciertos!=null?fmt(H.aciertos,0)+'%':'–')}</b></div>`).join('')}</div>`
+    + tabla([
+        {h:'Ticker', f:r=>tk(r.a||{t:r.f.t}, false)},
+        {h:'Entró', n:1, f:r=>`<span class="mut">${esc(fechaCorta(r.f.entro))}</span>`},
+        {h:'Precio entrada', n:1, f:r=>pr(r.f.px)},
+        {h:'Actual', n:1, f:r=>pr(r.f.ahora)},
+        {h:'Retorno', n:1, f:r=>`<b class="${cls(r.f.ret)}">${pct(r.f.ret)}</b>`},
+        {h:'SPY', n:1, f:r=>`<span class="${cls(r.f.spy)}">${pct(r.f.spy)}</span>`},
+        {h:'Sigue', f:r=>r.f.sigue?'<span class="up">sí</span>':'<span class="mut">no</span>'},
+      ], H.filas.map(f=>({f, a: idx2[f.t] || {t:f.t}})), 'Todavía no hay ingresos registrados: se van sumando desde hoy.')
+    + (H.ruedas < 5 ? `<p class="nota" style="margin:10px 0 0">El registro arrancó hace ${H.ruedas} ${H.ruedas===1?'rueda':'ruedas'}; se vuelve útil con algunas semanas de historia.</p>` : ''))}</div>` : '';
+  return `${foco}${selH}${trackH}${topH}<div class="grid inicio">${reg}${kpis}</div><div class="grid g2" style="margin-top:18px">${nuevos}${cart}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
     <h2 class="sec">Top 3 del score</h2>${spot}
     <h2 class="sec">Earnings próximos <small>7 días · activos que cumplen los requisitos</small></h2>
     ${card('Calendario', ev.length+(ev.length===1?' reporte':' reportes'), earn)}`;
@@ -2246,6 +2360,13 @@ function bloqueFund(a){
       ${caja('P/E', F.pe!=null?fmt(F.pe,1)+'x':'s/d')}${caja('% institucional', F.inst!=null?fmt(F.inst,0)+'%':'s/d')}</div>
     ${barras}${anual}`;
 }
+function rsLinea(v){
+  const w = 420, h = 70, pts = v.map((x,i)=>x==null?null:[i/(v.length-1)*w, h - x/100*h]).filter(Boolean);
+  const ult = v[v.length-1], ant = v.length>4 ? v[v.length-5] : null, col = ult>=80?'var(--up)':ult>=50?'var(--warn)':'var(--down)';
+  return `<svg viewBox="0 0 ${w} ${h+16}" width="100%" aria-hidden="true"><line x1="0" y1="${h-0.8*h}" x2="${w}" y2="${h-0.8*h}" stroke="var(--line2)" stroke-dasharray="3 4"/>
+    <polyline points="${pts.map(p=>p.map(x=>x.toFixed(1)).join(',')).join(' ')}" fill="none" stroke="${col}" stroke-width="2"/>
+    <text x="0" y="${h+13}" class="ax">línea punteada = RS 80</text><text x="${w}" y="${h+13}" text-anchor="end" class="ax">hoy ${fmt(ult,0)}${ant!=null?' · hace un mes '+fmt(ant,0):''}</text></svg>`;
+}
 function ficha(t){
   const a = D.activos.find(x=>x.t===t); if(!a) return;
   const PT = PILARES;
@@ -2278,8 +2399,10 @@ function ficha(t){
       <span>Volumen hoy</span><span>${big(a.vol_hoy)} · ${volx(a)} vs prom. 50</span>
       <span>Up/Down volume 50 días</span><span class="${a.ud50>=1?'up':'down'}">${a.ud50!=null?fmt(a.ud50,2):'s/d'}${a.ud50!=null?(a.ud50>=1?' · acumulación':' · distribución'):''}</span>
       <span>RS Rating</span><span>${fmt(a.rs,0)}</span>
-      ${a.etf ? `<span>ETF del sector</span><span>${esc(a.etf.t)}${a.etf.rs!=null?' · RS '+fmt(a.etf.rs,0):''} · <span class="${cls(a.etf.chg)}">${pct(a.etf.chg)}</span></span>` : ''}
+      ${a.etf ? `<span>ETF del sector</span><span>${esc(a.etf.t)}${a.etf.rs!=null?' · RS '+fmt(a.etf.rs,0):''} · <span class="${cls(a.etf.chg)}">${pct(a.etf.chg)}</span></span>
+        <span>Vs. ${esc(a.etf.t)} a 1 / 3 meses</span><span><span class="${cls(a.etf.vs1m)}">${pct(a.etf.vs1m,1)}</span> / <span class="${cls(a.etf.vs3m)}">${pct(a.etf.vs3m,1)}</span></span>` : ''}
     </div>
+    ${(a.rs16||[]).filter(x=>x!=null).length > 2 ? `<h4>RS · últimas ${a.rs16.length-1} semanas</h4>${rsLinea(a.rs16)}` : ''}
     <h4>Criterios de Minervini · ${a.mv}/8</h4>
     <ul class="checks">${MV.map((l,i)=>`<li><b class="${a.mv_checks[i]?'up':'down'}">${a.mv_checks[i]?'✓':'✗'}</b>${l}</li>`).join('')}</ul>
     ${bloqueFund(a)}
