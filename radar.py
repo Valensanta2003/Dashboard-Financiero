@@ -14,7 +14,7 @@ PCT_SOBRE_MINIMO_52S = 25
 PCT_DEBAJO_MAXIMO_52S = 30
 RS_MINIMO = 70
 EXIGIR_AVWAP = True
-ANCLAS_FUERTES = "Earnings, Episodic pivot, Máx. estructural, Máx. histórico"
+ANCLAS_FUERTES = "Earnings, Episodic pivot, Máx. estructural, Máx. histórico, Mín. estructural, Mín. mensual, Mín. histórico, IPO"
 # **AVWAP**
 DIST_POR_ROMPER_DIARIO = 3.0
 DIST_POR_ROMPER_SEMANAL = 5.0
@@ -753,6 +753,16 @@ def anclas(df, tf, earn=None, es_ipo=False, ep_ts=None):
     if n > k:
         i = int(np.argmax(df.High.values[:n - k]))
         if i < ini and i >= n - lim_ath: res.append(("Máx. histórico", i))
+    seg = df.iloc[ini:n - k]
+    if len(seg):
+        res.append(("Mín. estructural", df.index.get_loc(seg.Low.idxmin())))
+    # mínimo del último mes (21 ruedas o 4 semanas), sin contar las 2 últimas velas
+    seg = df.iloc[max(0, n - (21 if tf == "d" else 4) - 2):n - 2]
+    if len(seg):
+        res.append(("Mín. mensual", df.index.get_loc(seg.Low.idxmin())))
+    if n > k:
+        i = int(np.argmin(df.Low.values[:n - k]))
+        if i < ini and i >= n - lim_ath: res.append(("Mín. histórico", i))
     if es_ipo: res.append(("IPO", 0))
     vistos, out = set(), []
     for nom, i in res:
@@ -792,12 +802,13 @@ def estado_avwap(df, nom, i, tf):
 def _norm(x):
     import unicodedata
     x = unicodedata.normalize("NFKD", str(x).strip().lower()).encode("ascii", "ignore").decode()
-    return x.replace("maximo", "max").replace(".", "").replace(" ", "")
+    return x.replace("maximo", "max").replace("minimo", "min").replace(".", "").replace(" ", "")
 
 def anclas_fuertes():
     """Nombres de ancla (como los arma el motor) que figuran en ANCLAS_FUERTES, sin importar tildes ni puntos."""
     pedidas = {_norm(x) for x in str(ANCLAS_FUERTES).split(",") if x.strip()}
-    return {n for n in ("Earnings", "Episodic pivot", "Alto volumen", "Máx. estructural", "Máx. histórico", "IPO")
+    return {n for n in ("Earnings", "Episodic pivot", "Alto volumen", "Máx. estructural", "Máx. histórico",
+                           "Mín. estructural", "Mín. mensual", "Mín. histórico", "IPO")
             if _norm(n) in pedidas}
 
 def setup_avwap(df, avs):
