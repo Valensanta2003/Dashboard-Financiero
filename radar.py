@@ -1,6 +1,6 @@
 # ⚙️ CONFIGURACIÓN — cambiá los valores y guardá (commit). La próxima corrida los usa.
 # **Identidad**
-NOMBRE_DASHBOARD = "Valensanta Momentum"
+NOMBRE_DASHBOARD = "Cuadrito colorado"
 LEMA = "1% better every day"
 AVATAR_URL = "https://pbs.twimg.com/profile_images/1918682628393148416/lIVS4K5f_400x400.jpg"  # foto de @Valensantaa__; si falla se ve el logo
 # **Requisitos**
