@@ -69,6 +69,9 @@ CRUCE_SEMANAS = 4  # un cruce de RSI o MACD semanal cuenta si pasó en las últi
 # **Retorno del Top del score** (track record entre corridas)
 TOP_N = 10        # cuántas del ranking se siguen
 TOP_RUEDAS = 10   # ventana en ruedas para medir el retorno desde que entraron
+# **Módulos de Inicio y Sectores**
+CARTELERA_N = 6          # cuántas suben y cuántas bajan en la cartelera del día (acciones líquidas)
+ROTACION_SEMANAS = 16    # semanas de historia en los cuadrantes de rotación
 # **Episodic pivots y banderas**
 EP_MIN_SUBA = 4.0
 EP_MIN_VOL = 2.0
@@ -165,12 +168,14 @@ def _extraer(tablas):
             for _, r in t.iterrows():
                 s = str(r[tick]).strip().replace(".", "-")
                 if s and s.lower() != "nan":
-                    filas.append((s, str(r[nom]) if nom else s, SECTORES_ES.get(str(r[sec]).strip(), str(r[sec]).strip()), "accion"))
+                    filas.append((s, str(r[nom]) if nom else s, SECTORES_ES.get(str(r[sec]).strip(), str(r[sec]).strip()), "accion", ""))
             return filas
     return []
 
 _NO_COMUNES = (r"\b(warrants?|rights?|preferred|pfd|perpetual|debentures?|subordinated|notes? due)\b"
                r"|(?<!common )\bunits?\b|\d% |depositary shares,? each representing (a |one )?\d*/\d+")
+
+BOLSAS_TV = {"N": "NYSE", "A": "AMEX", "P": "AMEX", "Z": "CBOE", "V": "IEX"}  # código de NASDAQ Trader → prefijo de TradingView
 
 def listado_eeuu():
     """Acciones comunes y ADRs de NASDAQ, NYSE, NYSE American y Arca según NASDAQ Trader (sin ETFs, warrants, units, rights ni preferidas)."""
@@ -181,13 +186,14 @@ def listado_eeuu():
         txt = requests.get(base + arch, headers={"User-Agent": "Mozilla/5.0"}, timeout=30).text
         d = pd.read_csv(io.StringIO(txt), sep="|", dtype=str)
         d = d[~d.iloc[:, 0].str.startswith("File Creation", na=True)]
-        partes.append(pd.DataFrame({"s": d[col], "n": d["Security Name"], "etf": d["ETF"], "test": d["Test Issue"]}))
+        bolsa = "NASDAQ" if arch.startswith("nasdaq") else d["Exchange"].map(BOLSAS_TV).fillna("")
+        partes.append(pd.DataFrame({"s": d[col], "n": d["Security Name"], "etf": d["ETF"], "test": d["Test Issue"], "bolsa": bolsa}))
     d = pd.concat(partes)
     d = d[(d.etf != "Y") & (d.test != "Y") & d.s.notna() & d.n.notna()]
     d = d[~d.n.str.contains(_NO_COMUNES, flags=re.I, regex=True)]
     d = d[~d.s.str.contains(r"[$^\s=]", regex=True)]
     limpiar = lambda n: re.sub(r"\s*[-,]?\s*(Class [A-Z] )?(Common (Stock|Shares|Units)|Ordinary Shares?|American Depositary (Shares|Receipts)).*$", "", n, flags=re.I).strip() or n
-    return [(s.replace(".", "-").replace("/", "-"), limpiar(n), "Sin clasificar", "accion") for s, n in zip(d.s, d.n)]
+    return [(s.replace(".", "-").replace("/", "-"), limpiar(n), "Sin clasificar", "accion", b) for s, n, b in zip(d.s, d.n, d.bolsa)]
 
 def obtener_universo():
     filas = []
@@ -210,12 +216,12 @@ def obtener_universo():
             print(f"  ⚠️ No pude leer {url}: {e}")
     if fuentes and not filas:
         print("  ⚠️ Uso la lista de respaldo de acciones")
-        filas += [(t, t, "Sin clasificar", "accion") for t in RESPALDO]
+        filas += [(t, t, "Sin clasificar", "accion", "") for t in RESPALDO]
     extra = [t.strip().upper() for t in str(TICKERS_EXTRA).replace(";", ",").split(",") if t.strip()]
-    filas += [(t, t, "Tu lista", "accion") for t in extra]
-    if INCLUIR_ETFS: filas += [(t, n, "ETF", "etf") for t, n in ETFS.items()]
-    if INCLUIR_CRIPTO: filas += [(t, n, "Cripto", "cripto") for t, n in CRIPTO.items()]
-    u = pd.DataFrame(filas, columns=["ticker", "nombre", "sector", "tipo"]).drop_duplicates("ticker", keep="first")
+    filas += [(t, t, "Tu lista", "accion", "") for t in extra]
+    if INCLUIR_ETFS: filas += [(t, n, "ETF", "etf", "") for t, n in ETFS.items()]
+    if INCLUIR_CRIPTO: filas += [(t, n, "Cripto", "cripto", "CRYPTO") for t, n in CRIPTO.items()]
+    u = pd.DataFrame(filas, columns=["ticker", "nombre", "sector", "tipo", "bolsa"]).drop_duplicates("ticker", keep="first")
     return u.reset_index(drop=True)
 
 # ---------------------------------------------------------------- datos
@@ -678,7 +684,15 @@ def regimen(indices, vix, acciones):
         det.append(f"{t}: tendencia {int(s_t)}/10, {dd} días de distribución en 25 ruedas, {ext:+.1f} ATR de la EMA50")
     if mx: capas.append({"nombre": "Índices SPY y QQQ", "pts": num(pts, 1), "max": mx, "det": det})
     acc = [d for d in acciones if len(d) >= 220]
+    hist200 = []
     if len(acc) >= 50:
+        try:
+            cierres = pd.concat({i: d.Close for i, d in enumerate(acc)}, axis=1).sort_index()
+            sobre = (cierres > cierres.ewm(span=200, adjust=False).mean()).where(cierres.notna())
+            serie = sobre.mean(axis=1).iloc[-42:] * 100
+            hist200 = [[f.strftime("%d-%m"), num(v, 1)] for f, v in serie.items() if pd.notna(v)]
+        except Exception:
+            hist200 = []
         pe200 = np.mean([d.Close.iloc[-1] > ema(d.Close, 200).iloc[-1] for d in acc])
         ps200 = np.mean([d.Close.iloc[-1] > d.Close.iloc[-200:].mean() for d in acc])
         p50 = np.mean([d.Close.iloc[-1] > ema(d.Close, 50).iloc[-1] for d in acc])
@@ -702,7 +716,7 @@ def regimen(indices, vix, acciones):
     elif total < 60: et, rec = "Cauteloso", "Posiciones chicas y solo los mejores setups."
     elif total < 80: et, rec = "Favorable", "Mercado acompaña: setups A+ con tamaño normal."
     else: et, rec = "Expansión", "Viento a favor: exposición plena en los líderes."
-    return {"score": num(total, 0), "etiqueta": et, "rec": rec, "capas": capas}
+    return {"score": num(total, 0), "etiqueta": et, "rec": rec, "capas": capas, "hist200": hist200}
 
 # ---------------------------------------------------------------- AVWAP
 def avwap_desde(df, i):
@@ -1077,8 +1091,40 @@ def top_retorno(activos, fecha, spy):
         ini = spy[spy.index <= pd.Timestamp(ventana[0])]
         if len(ini): r_spy = num((spy.iloc[-1] / ini.iloc[-1] - 1) * 100, 2)
     rets = [f["ret"] for f in filas if f["ret"] is not None]
-    return {"ruedas": len(ventana), "desde": ventana[0] if ventana else fecha, "spy": r_spy,
+    hoy30 = [a["t"] for a in rank[:30]]
+    ant30 = set(sorted(hist[fechas[-2]], key=lambda t: -hist[fechas[-2]][t][0])[:30]) if len(fechas) >= 2 else None
+    nuevos = [t for t in hoy30 if ant30 is not None and t not in ant30]
+    return {"nuevos": nuevos, "nuevos_desde": fechas[-2] if len(fechas) >= 2 else None, "ruedas": len(ventana), "desde": ventana[0] if ventana else fecha, "spy": r_spy,
             "medio": num(sum(rets) / len(rets), 2) if rets else None, "filas": filas}
+
+# ---------------------------------------------------------------- rotación (cuadrantes tipo RRG)
+def rotacion(diario, etfs):
+    """RS (percentil del universo) de cada ETF en las últimas ROTACION_SEMANAS + 1 semanas, de la más vieja a la más nueva."""
+    sem = ROTACION_SEMANAS + 1
+    arr = {t: df.Close.values for t, df in diario.items() if len(df) >= 60}
+    def rsb(c, e):
+        def r(n): return c[e] / c[e - n] - 1 if e - n >= 0 else c[e] / c[0] - 1
+        return 0.4 * r(63) + 0.2 * r(126) + 0.2 * r(189) + 0.2 * r(252)
+    por_semana = []
+    for k in range(sem - 1, -1, -1):
+        crudo = {t: rsb(c, len(c) - 1 - 5 * k) for t, c in arr.items() if len(c) - 1 - 5 * k >= 60}
+        por_semana.append(pd.Series(crudo).rank(pct=True) * 98 + 1)
+    ref = diario.get("SPY")
+    fechas = [ref.index[-1 - 5 * k].strftime("%d-%m") for k in range(sem - 1, -1, -1)] if ref is not None and len(ref) > 5 * sem else []
+    out = []
+    for t, n in etfs.items():
+        if t == "SPY" or t not in arr: continue
+        serie = [num(x.get(t), 1) if t in x.index else None for x in por_semana]
+        if serie[-1] is None or serie[-2] is None: continue
+        out.append({"t": t, "n": n, "rs": serie})
+    return {"fechas": fechas, "etfs": out}
+
+def cartelera(diario, tickers, nombres):
+    """Las que más suben y más bajan hoy entre las acciones líquidas."""
+    ch = {t: (diario[t].Close.iloc[-1] / diario[t].Close.iloc[-2] - 1) * 100 for t in tickers if len(diario[t]) > 1}
+    orden = sorted(ch, key=lambda t: -ch[t])
+    fila = lambda t: {"t": t, "n": nombres.get(t, t), "chg": num(ch[t], 2), "precio": num(diario[t].Close.iloc[-1], 2)}
+    return {"suben": [fila(t) for t in orden[:CARTELERA_N]], "bajan": [fila(t) for t in orden[::-1][:CARTELERA_N]]}
 
 # ---------------------------------------------------------------- score
 def partes_score(mv, rs, comp_d, sav_d, comp_d_rup, ins_d, piv, vcp=None, fund=None, tc=None):
@@ -1169,6 +1215,7 @@ def correr():
     # La amplitud se mide sobre las acciones líquidas, no sobre las micro caps del listado completo
     reg = regimen({t: diario.get(t, extra.get(t)) for t in ("SPY", "QQQ")}, extra.get("^VIX"),
                   [diario[t] for t in paso if es_acc(t)])
+    liquidas = [t for t in paso if es_acc(t)]
     paso = [t for t in paso if adr_pct(diario[t]) >= ADR_MINIMO]
     embudo.append((f"ADR ≥ {ADR_MINIMO:g}%", len(paso)))
     spy = diario.get("SPY")
@@ -1216,7 +1263,7 @@ def correr():
         rs = float(rs_pct[t]); c = df.Close; pf = perf.get(t) or {}
         activos.append({
             "t": t, "nombre": str(pf.get("nombre") or info.at[t, "nombre"]), "sector": str(pf.get("sector") or info.at[t, "sector"]),
-            "industria": pf.get("industria"), "tipo": tipo, "mcap": num(pf["mcap"], 0) if pf.get("mcap") else None,
+            "industria": pf.get("industria"), "tipo": tipo, "bolsa": str(info.at[t, "bolsa"] or ""), "mcap": num(pf["mcap"], 0) if pf.get("mcap") else None,
             "vol50": num(liq[t][1], 0) if t in liq else None, "dvol50": num(liq[t][2], 0) if t in liq else None,
             "precio": num(c.iloc[-1], 4), "chg": num((c.iloc[-1] / c.iloc[-2] - 1) * 100),
             "ret21": num(ret21[t] * 100, 1), "rs": num(rs, 0), "mv": sum(checks), "mv_checks": checks, **tecnico(df, wk, e),
@@ -1267,12 +1314,15 @@ def correr():
     foco = lista_foco(activos)
     fecha_iso = max(df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto").strftime("%Y-%m-%d")
     top = top_retorno(activos, fecha_iso, spy_c)
+    nombres = {t: str((perf.get(t) or {}).get("nombre") or info.at[t, "nombre"]) for t in liquidas}
+    cart = cartelera(diario, liquidas, nombres)
+    rot = rotacion(diario, ETFS) if INCLUIR_ETFS else None
     print(f"   Top {TOP_N}: {top['medio']}% promedio en {top['ruedas']} ruedas vs SPY {top['spy']}%")
     print(f"   Lista de foco: {len(foco)}")
     fechas = [df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto"] or [hoy]
     datos = {"meta": {
         "fecha_datos": max(fechas).strftime("%d-%m-%Y"), "generado": ahora_ar().strftime("%d-%m-%Y %H:%M"),
-        "n_universo": len(diario), "top": top, "nombre": NOMBRE_DASHBOARD, "lema": LEMA, "avatar": AVATAR_URL, "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
+        "n_universo": len(diario), "top": top, "cartelera": cart, "rotacion": rot, "nombre": NOMBRE_DASHBOARD, "lema": LEMA, "avatar": AVATAR_URL, "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
         "params": {"min_mv": MIN_CRITERIOS_MINERVINI, "sobre_min": PCT_SOBRE_MINIMO_52S, "bajo_max": PCT_DEBAJO_MAXIMO_52S,
                    "rs_min": RS_MINIMO, "precio_min": PRECIO_MINIMO, "exigir_av": EXIGIR_AVWAP,
                    "dist_d": DIST_POR_ROMPER_DIARIO, "dist_w": DIST_POR_ROMPER_SEMANAL,
@@ -1428,6 +1478,21 @@ h2.sec small{color:var(--muted);font-family:var(--ui);text-transform:none;letter
 .scp{display:inline-block;min-width:38px;text-align:center;padding:2px 8px;border-radius:999px;border:1px solid color-mix(in srgb,var(--acc) 45%,transparent);color:var(--acc);font-family:var(--mono)}
 .rbar{display:inline-block;width:110px;height:8px;border-radius:4px;background:var(--line);overflow:hidden}
 .rbar i{display:block;height:100%;border-radius:4px;background:var(--acc)}.rbar i.neg{background:var(--down)}
+.tvexp{font-size:13px;padding:7px 12px}
+.h200{margin-top:14px}.h200 small{display:block;margin-bottom:4px;font-size:12px}
+svg .ax{font-size:11px;fill:var(--muted);font-family:var(--mono)}
+.g2c{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+h5{margin:0 0 8px;font-family:var(--mono);font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+h5.up{color:var(--up)}h5.down{color:var(--down)}
+.cart{display:grid;gap:6px}.ci{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:baseline;font-size:13px;padding:5px 8px;border-radius:8px;border:1px solid var(--line)}
+.ci span{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ci em{font-style:normal;font-weight:700;font-family:var(--mono)}
+.ci.en{cursor:pointer;border-color:color-mix(in srgb,var(--acc) 45%,transparent)}.ci.en b{color:var(--acc)}
+.g2r{grid-template-columns:minmax(0,1.6fr) minmax(0,1fr)}
+@media (max-width:1100px){.g2r{grid-template-columns:1fr}}
+.rrg .ej{stroke:var(--line2)}.rrg .qd{font-family:var(--mono);font-size:11px;letter-spacing:.12em}
+.rrg .et{font-size:11px;fill:var(--text);font-family:var(--mono)}
+.rrgc{display:flex;gap:10px;align-items:center;margin-top:8px}.rrgc input{flex:1;accent-color:var(--acc)}
+@media (max-width:560px){.g2c{grid-template-columns:1fr}}
 .embudo{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
 .embudo .paso{display:flex;flex-direction:column;min-width:0}
 .embudo .paso b{font-size:20px;font-variant-numeric:tabular-nums}
@@ -1589,6 +1654,7 @@ footer{color:var(--faint);font-size:12.5px;margin-top:40px;max-width:95ch}
           <button data-v="cripto" aria-pressed="false">Cripto</button>
         </div>
         <input type="search" id="q" placeholder="Buscar ticker" aria-label="Buscar ticker">
+        <button class="chip tvexp" id="tvexp" title="Baja un .txt con los tickers de esta vista para importar como watchlist en TradingView">Watchlist TV</button>
       </div>
     </header>
     <div class="viejo" id="viejo" role="status"></div>
@@ -1707,6 +1773,15 @@ function tabla(cols, rows, vacio){
 const card = (titulo, sub, cuerpo) => `<div class="card"><h3>${titulo}${sub!=null?` <small>${sub}</small>`:''}</h3>${cuerpo}</div>`;
 
 /* ---------- Inicio ---------- */
+function area(h){
+  const w = 600, ht = 90, v = h.map(x=>x[1]), mn = Math.max(0, Math.min(...v) - 5), mx = Math.min(100, Math.max(...v) + 5);
+  const X = i => i/(h.length-1)*w, Y = x => ht - (x-mn)/(mx-mn||1)*ht;
+  const pts = v.map((x,i)=>`${X(i).toFixed(1)},${Y(x).toFixed(1)}`).join(' ');
+  const ult = v[v.length-1], col = ult>=60?'var(--up)':ult>=40?'var(--warn)':'var(--down)';
+  return `<svg viewBox="0 0 ${w} ${ht+18}" width="100%" preserveAspectRatio="none" aria-hidden="true">
+    <polygon points="0,${ht} ${pts} ${w},${ht}" fill="${col}" opacity=".12"/><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    <text x="0" y="${ht+14}" class="ax">${esc(h[0][0])}</text><text x="${w}" y="${ht+14}" text-anchor="end" class="ax">${esc(h[h.length-1][0])} · ${fmt(ult,0)}%</text></svg>`;
+}
 function gauge(v){
   const L = Math.PI*90, col = v<40?'var(--down)':v<60?'var(--warn)':'var(--acc)';
   return `<svg viewBox="0 0 200 110" width="100%" aria-hidden="true">
@@ -1714,6 +1789,24 @@ function gauge(v){
     <path d="M10 100 A90 90 0 0 1 190 100" fill="none" stroke="${col}" stroke-width="14" stroke-linecap="round" stroke-dasharray="${(L*v/100).toFixed(1)} ${L.toFixed(1)}"/></svg>`;
 }
 const m0 = E => E.length ? E[0][1] : 0;
+const symTV = t => { const a = D.activos.find(x=>x.t===t);
+  if(a && a.tipo==='cripto') return 'CRYPTO:' + t.replace('-','');
+  const s = t.replace('-','.'); return a && a.bolsa ? a.bolsa + ':' + s : s; };
+function exportarTV(){
+  // Una sección por tarjeta de la vista actual, en el orden en que se ven (formato de importación de TradingView)
+  const partes = [], vistos = new Set();
+  document.querySelectorAll('#vista .card').forEach(c => {
+    const h = c.querySelector('h3'); const ts = [...c.querySelectorAll('[data-t]')].map(x=>x.dataset.t).filter(t=>!vistos.has(t));
+    if(!ts.length) return;
+    ts.forEach(t=>vistos.add(t));
+    const titulo = h ? (h.childNodes[0].textContent || '').trim().replace(/[,#]/g,'') : 'Lista';
+    partes.push('###' + titulo, ...ts.map(symTV));
+  });
+  if(!partes.length){ alert('No hay tickers en esta vista.'); return; }
+  const pg = PAGS.find(x=>x[0]===S.pag), nombre = (D.meta.nombre||'radar').replace(/\s+/g,'_') + '_' + (S.pag==='gatillos' ? S.gat : S.pag) + '.txt';
+  const b = new Blob([partes.join(',\n')], {type:'text/plain'}), u = URL.createObjectURL(b);
+  const l = document.createElement('a'); l.href = u; l.download = nombre; document.body.appendChild(l); l.click(); l.remove(); setTimeout(()=>URL.revokeObjectURL(u), 1000);
+}
 const fechaCorta = f => { const x = /(\d{4})-(\d{2})-(\d{2})/.exec(f||''); return x ? `${+x[3]}-${MES[+x[2]-1]}` : (f||''); };
 function vInicio(){
   const act = visibles(), tf = S.tf, R = D.meta.regimen;
@@ -1731,6 +1824,7 @@ function vInicio(){
     <div class="reg"><div class="gauge">${gauge(R.score)}<div class="v"><b>${fmt(R.score,0)}</b><span style="color:${R.score<40?'var(--down)':R.score<60?'var(--warn)':'var(--acc)'}">${esc(R.etiqueta)}</span></div></div>
       <div class="capas">${R.capas.map(c=>`<div class="capa"><div class="fila"><span>${esc(c.nombre)}</span><span>${fmt(c.pts,0)} / ${c.max}</span></div>
         <div class="pbar"><i style="width:${c.pts/c.max*100}%"></i></div>${c.det.map(d=>`<small>${esc(d)}</small>`).join('')}</div>`).join('')}</div></div>
+    ${(R.hist200||[]).length>2 ? `<div class="h200"><small class="mut">% de acciones líquidas sobre su EMA200 · últimas ${R.hist200.length} ruedas</small>${area(R.hist200)}</div>` : ''}
     <div class="rec">${esc(R.rec)}</div></div>` : card('Régimen de mercado', null, '<p class="vacio">No se pudo calcular en esta corrida.</p>');
   const top = act.slice().sort((x,y)=>y.score-x.score).slice(0,3);
   const idx = Object.fromEntries(D.activos.map(a=>[a.t,a]));
@@ -1781,13 +1875,68 @@ function vInicio(){
       + tabla(cols, T.filas.filter(f=>idx[f.t]).map((f,i)=>({f, i, a:idx[f.t]})), '')
       + (T.ruedas < P.top_ruedas ? `<p class="nota" style="margin:10px 0 0">El historial arrancó hace ${T.ruedas} ${T.ruedas===1?'rueda':'ruedas'}: hasta juntar ${P.top_ruedas}, la ventana es más corta.</p>` : ''))}</div>`;
   })() : '';
-  return `${foco}${topH}<div class="grid inicio">${reg}${kpis}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
+  const idx2 = Object.fromEntries(D.activos.map(a=>[a.t,a]));
+  const nv = (T && T.nuevos || []).filter(t=>idx2[t]).map(t=>idx2[t]);
+  const cNv = [
+    {h:'Ticker', f:r=>tk(r.a, false)},
+    {h:'3 meses', f:r=>spark(r.a.spark_d)},
+    {h:'Score', n:1, f:r=>`<span class="scp">${fmt(r.a.score,0)}</span>`},
+    {h:'RS', n:1, f:r=>fmt(r.a.rs,0)},
+    {h:'vs EMA200', n:1, f:r=>`<span class="${cls(r.a.d200)}">${pct(r.a.d200,1)}</span>`},
+  ];
+  const nuevos = card('Nuevos ingresos al Top 30', T && T.nuevos_desde ? 'contra el '+esc(fechaCorta(T.nuevos_desde)) : null,
+    T && T.nuevos_desde ? tabla(cNv, nv.map(a=>({a})), 'Ninguna entró al Top 30 desde la rueda anterior.') : '<p class="vacio">Aparece desde la próxima rueda (hace falta el historial de ayer).</p>');
+  const C = D.meta.cartelera;
+  const lista = (l, c) => `<div class="cart">${l.map(x=>`<div class="ci ${idx2[x.t]?'en':''}" ${idx2[x.t]?`data-t="${esc(x.t)}" tabindex="0"`:''}><b>${esc(x.t)}</b><span>${esc(x.n)}</span><em class="${c}">${pct(x.chg,1)}</em></div>`).join('')}</div>`;
+  const cart = C ? card('Cartelera del día', 'acciones líquidas · en verde las que están en el radar',
+    `<div class="g2c"><div><h5 class="up">Más suben</h5>${lista(C.suben,'up')}</div><div><h5 class="down">Más bajan</h5>${lista(C.bajan,'down')}</div></div>`) : '';
+  return `${foco}${topH}<div class="grid inicio">${reg}${kpis}</div><div class="grid g2" style="margin-top:18px">${nuevos}${cart}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
     <h2 class="sec">Top 3 del score</h2>${spot}
     <h2 class="sec">Earnings próximos <small>7 días · activos que cumplen los requisitos</small></h2>
     ${card('Calendario', ev.length+(ev.length===1?' reporte':' reportes'), earn)}`;
 }
 
 /* ---------- Sectores ---------- */
+const CUAD = {lid:['Liderando','var(--up)'], deb:['Debilitándose','var(--warn)'], rez:['Rezagados','var(--down)'], mej:['Mejorando','var(--blue)']};
+const cuad = (rs, d) => rs>=50 ? (d>=0?'lid':'deb') : (d>=0?'mej':'rez');
+function rotPuntos(k){
+  // k = índice de la semana (1..n-1): ΔRS contra la semana anterior
+  return (D.meta.rotacion.etfs||[]).filter(e=>e.rs[k]!=null && e.rs[k-1]!=null).map(e=>({t:e.t, n:e.n, x:e.rs[k], y:e.rs[k]-e.rs[k-1], prev: k>1 && e.rs[k-2]!=null ? [e.rs[k-1], e.rs[k-1]-e.rs[k-2]] : null}));
+}
+function rotSvg(k){
+  const R = D.meta.rotacion, pts = rotPuntos(k);
+  const todos = R.etfs.flatMap(e=>e.rs.slice(1).map((v,i)=>v!=null&&e.rs[i]!=null ? Math.abs(v-e.rs[i]) : 0));
+  const my = Math.max(5, ...todos) * 1.1, w = 640, h = 380, X = x => 14 + x/100*(w-60), Y = y => h/2 - y/my*(h/2 - 26);
+  const q = (x, y, txt, c) => `<text x="${x}" y="${y}" class="qd" fill="${c}">${txt}</text>`;
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" class="rrg" aria-label="Cuadrantes de rotación">
+    <rect x="${w/2}" y="0" width="${w/2}" height="${h/2}" fill="var(--up)" opacity=".05"/><rect x="0" y="0" width="${w/2}" height="${h/2}" fill="var(--blue)" opacity=".05"/>
+    <rect x="0" y="${h/2}" width="${w/2}" height="${h/2}" fill="var(--down)" opacity=".05"/><rect x="${w/2}" y="${h/2}" width="${w/2}" height="${h/2}" fill="var(--warn)" opacity=".05"/>
+    <line x1="${X(50)}" y1="0" x2="${X(50)}" y2="${h}" class="ej"/><line x1="0" y1="${h/2}" x2="${w}" y2="${h/2}" class="ej"/>
+    ${q(10,18,'MEJORANDO','var(--blue)')}${q(w-10,18,'LIDERANDO','var(--up)').replace('<text','<text text-anchor="end"')}
+    ${q(10,h-8,'REZAGADOS','var(--down)')}${q(w-10,h-8,'DEBILITÁNDOSE','var(--warn)').replace('<text','<text text-anchor="end"')}
+    ${pts.map(p=>{ const c = CUAD[cuad(p.x,p.y)][1];
+      return `${p.prev?`<line x1="${X(p.prev[0])}" y1="${Y(p.prev[1])}" x2="${X(p.x)}" y2="${Y(p.y)}" stroke="${c}" opacity=".35"/>`:''}
+      <circle cx="${X(p.x)}" cy="${Y(p.y)}" r="6" fill="${c}" opacity=".85"><title>${esc(p.t)} · ${esc(p.n)} · RS ${fmt(p.x,0)} · ΔRS ${fmt(p.y,1)}</title></circle>
+      <text x="${X(p.x)+8}" y="${Y(p.y)+4}" class="et">${esc(p.t)}</text>`; }).join('')}
+    <text x="${w-4}" y="${h/2-4}" text-anchor="end" class="ax">RS →</text><text x="${w/2+4}" y="12" class="ax">ΔRS semanal ↑</text></svg>`;
+}
+function rotacionHTML(){
+  const R = D.meta.rotacion; if(!R || !(R.etfs||[]).length) return '';
+  const n = R.etfs[0].rs.length - 1, k = S.rotK ?? n;
+  const ahora = rotPuntos(n), antes = Object.fromEntries(rotPuntos(n-1).map(p=>[p.t, cuad(p.x,p.y)]));
+  const g = {lid:[],deb:[],rez:[],mej:[]}; ahora.forEach(p=>g[cuad(p.x,p.y)].push(p.t));
+  const recien = ahora.filter(p=>cuad(p.x,p.y)==='lid' && antes[p.t] && antes[p.t]!=='lid').map(p=>p.t);
+  const acel = ahora.slice().sort((a,b)=>b.y-a.y).slice(0,5);
+  const lect = `Liderando: ${g.lid.length ? g.lid.join(', ') : 'ninguno'}. Mejorando: ${g.mej.length ? g.mej.join(', ') : 'ninguno'}. `
+    + `Se debilitan: ${g.deb.length ? g.deb.join(', ') : 'ninguno'}. ${g.lid.length + g.mej.length > g.deb.length + g.rez.length ? 'Más ETFs ganando fuerza que perdiéndola.' : 'Más ETFs perdiendo fuerza que ganándola.'}`;
+  return `<div class="grid g2r" style="margin-bottom:20px">${card('Cuadrantes de rotación', 'ETFs · RS del universo contra su cambio semanal',
+      `<div id="rrg">${rotSvg(k)}</div>
+       <div class="rrgc"><button class="chip" id="rplay">${S.rotPlay?'Pausa':'Play'}</button>
+       <input type="range" id="rk" min="1" max="${n}" value="${k}" aria-label="Semana"><span class="mut" id="rkf">${esc((R.fechas||[])[k]||'')}</span></div>`)}
+    ${card('Lectura de rotación', null, `<p style="margin:0 0 12px">${esc(lect)}</p>
+      <h5>Recién a Líderes</h5><p class="mut" style="margin:0 0 12px">${recien.length ? recien.map(esc).join(', ') : 'Ninguno esta semana.'}</p>
+      <h5>Aceleración inusual</h5><div class="kv">${acel.map(p=>`<span>${esc(p.t)} · ${esc(p.n)}</span><span class="${cls(p.y)}">${p.y>0?'+':''}${fmt(p.y,1)}</span>`).join('')}</div>`)}</div>`;
+}
 function vSectores(){
   const act = visibles(), tf = S.tf, g = {};
   act.forEach(a => (g[a.sector] = g[a.sector] || []).push(a));
@@ -1811,7 +1960,7 @@ function vSectores(){
     {h:'1 mes', n:1, f:r=>`<span class="${cls(r.a.ret21)}">${pct(r.a.ret21,1)}</span>`},
   ];
   const lista = S.sector ? secs.filter(x=>x.s===S.sector) : secs;
-  return `${franja}<div class="grid gauto">${lista.map(x => card(esc(x.s), x.l.length+' en total', tabla(cols, x.l.slice(0,5).map((a,i)=>({a,i})), ''))).join('')}</div>`;
+  return `${rotacionHTML()}${franja}<div class="grid gauto">${lista.map(x => card(esc(x.s), x.l.length+' en total', tabla(cols, x.l.slice(0,5).map((a,i)=>({a,i})), ''))).join('')}</div>`;
 }
 
 /* ---------- AVWAP ---------- */
@@ -2138,6 +2287,7 @@ function seg(id, key){
 seg('tf','tf'); seg('tipo','tipo');
 $('#rail').addEventListener('click', e => { const b = e.target.closest('[data-pag]'); if(b) ir(b.dataset.pag); });
 $('#q').addEventListener('input', e => { S.q = e.target.value; render(); });
+$('#tvexp').addEventListener('click', exportarTV);
 $('#vista').addEventListener('click', e => {
   const k = e.target.closest('[data-ir]'); if(k){ ir(k.dataset.ir); return; }
   const gt = e.target.closest('[data-gat]'); if(gt){ S.gat = gt.dataset.gat; render(); return; }
@@ -2148,8 +2298,17 @@ $('#vista').addEventListener('click', e => {
   const em = e.target.closest('[data-ema]'); if(em){ S.emaF = +em.dataset.ema; render(); return; }
   const eh = e.target.closest('[data-ephoy]'); if(eh){ S.epHoy = eh.dataset.ephoy==='1'; render(); return; }
   const ch = e.target.closest('[data-in]'); if(ch){ S.insideMin = +ch.dataset.in; render(); return; }
+  if(e.target.closest('#rplay')){
+    S.rotPlay = !S.rotPlay; e.target.closest('#rplay').textContent = S.rotPlay ? 'Pausa' : 'Play';
+    clearInterval(S.rotTimer);
+    if(S.rotPlay){ const n = D.meta.rotacion.etfs[0].rs.length - 1; if((S.rotK ?? n) >= n) S.rotK = 1;
+      S.rotTimer = setInterval(()=>{ const n2 = D.meta.rotacion.etfs[0].rs.length - 1; S.rotK = Math.min(n2, (S.rotK ?? n2) + 1); pintarRot(); if(S.rotK>=n2){ S.rotPlay=false; clearInterval(S.rotTimer); const b=$('#rplay'); if(b) b.textContent='Play'; } }, 700); }
+    return;
+  }
   const tr = e.target.closest('[data-t]'); if(tr) ficha(tr.dataset.t);
 });
+function pintarRot(){ const r = $('#rrg'); if(!r) return; const k = S.rotK; r.innerHTML = rotSvg(k); const i = $('#rk'); if(i) i.value = k; const f = $('#rkf'); if(f) f.textContent = (D.meta.rotacion.fechas||[])[k]||''; }
+$('#vista').addEventListener('input', e => { if(e.target.id==='rk'){ S.rotK = +e.target.value; pintarRot(); } });
 $('#vista').addEventListener('keydown', e => { const tr = e.target.closest('[data-t]'); if(tr && (e.key==='Enter'||e.key===' ')){ e.preventDefault(); ficha(tr.dataset.t); } });
 $('#ficha').addEventListener('click', e => { if(e.target.closest('#cerrar')) cerrarFicha(); });
 $('#velo').addEventListener('click', cerrarFicha);
