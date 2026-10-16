@@ -11,6 +11,7 @@ ADR_PERIODO = 20
 MIN_CRITERIOS_MINERVINI = 6
 EXIGIR_RS = False  # True: además del X/8, exige RS Rating de RS_MINIMO o más
 PCT_SOBRE_MINIMO_52S = 25
+PCT_SOBRE_MINIMO_52S_ETF = 15  # índices y ETFs rara vez suben 25% desde su mínimo anual
 PCT_DEBAJO_MAXIMO_52S = 30
 RS_MINIMO = 70
 EXIGIR_AVWAP = True
@@ -541,7 +542,7 @@ def pendiente(s, n):
     if s.iloc[-1] > s.iloc[-2]: return 2 if s.iloc[-1] > s.iloc[-1 - n] else 1
     return -2 if s.iloc[-1] < s.iloc[-1 - n] else -1
 
-def minervini(df, spy):
+def minervini(df, spy, fondo=False):
     """Los 8 criterios del "Minervini Trend Compact v2.3" de TradingView: EMAs, extremos de 252 velas y línea de RS vs SPY."""
     c = df.Close; p = c.iloc[-1]
     e = {n: ema(c, n) for n in (10, 20, 50, 150, 200)}
@@ -562,7 +563,7 @@ def minervini(df, spy):
         sube200,
         g(50) > g(150) and g(50) > g(200),
         p > g(50),
-        p >= lo * (1 + PCT_SOBRE_MINIMO_52S / 100),
+        p >= lo * (1 + (PCT_SOBRE_MINIMO_52S_ETF if fondo else PCT_SOBRE_MINIMO_52S) / 100),
         p >= hi * (1 - PCT_DEBAJO_MAXIMO_52S / 100),
         rs_linea,
     ]
@@ -1239,7 +1240,7 @@ def correr():
     spy_c = spy.Close if spy is not None else None
     cand = {}
     for t in paso:
-        checks, hi, lo, _ = minervini(diario[t], spy_c)
+        checks, hi, lo, _ = minervini(diario[t], spy_c, info.at[t, "tipo"] == "etf")
         if pasa_minervini(checks, rs_pct[t]):
             cand[t] = True
     embudo.append((f"Minervini {MIN_CRITERIOS_MINERVINI}/8", len(cand)))
@@ -1254,7 +1255,7 @@ def correr():
         df = hist.get(t)
         if df is None or len(df) < len(diario[t]): df = diario[t]
         # Con la historia completa las EMA150/200 quedan iguales a las de TradingView; se vuelve a chequear el X/8
-        checks, hi, lo, e = minervini(df, spy_c)
+        checks, hi, lo, e = minervini(df, spy_c, tipo == "etf")
         if not pasa_minervini(checks, rs_pct[t]): continue
         wk = semanal(df, tipo == "cripto")
         dfs_d[t] = df
@@ -1339,7 +1340,7 @@ def correr():
     datos = {"meta": {
         "fecha_datos": max(fechas).strftime("%d-%m-%Y"), "generado": ahora_ar().strftime("%d-%m-%Y %H:%M"),
         "n_universo": len(diario), "top": top, "cartelera": cart, "rotacion": rot, "nombre": NOMBRE_DASHBOARD, "lema": LEMA, "avatar": AVATAR_URL, "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
-        "params": {"min_mv": MIN_CRITERIOS_MINERVINI, "sobre_min": PCT_SOBRE_MINIMO_52S, "bajo_max": PCT_DEBAJO_MAXIMO_52S,
+        "params": {"min_mv": MIN_CRITERIOS_MINERVINI, "sobre_min": PCT_SOBRE_MINIMO_52S, "sobre_min_etf": PCT_SOBRE_MINIMO_52S_ETF, "bajo_max": PCT_DEBAJO_MAXIMO_52S,
                    "rs_min": RS_MINIMO, "precio_min": PRECIO_MINIMO, "exigir_av": EXIGIR_AVWAP,
                    "dist_d": DIST_POR_ROMPER_DIARIO, "dist_w": DIST_POR_ROMPER_SEMANAL,
                    "velas_d": VELAS_RUPTURA_DIARIO, "velas_w": VELAS_RUPTURA_SEMANAL, "emas_30m": lista_emas(),
@@ -2203,7 +2204,7 @@ function vSetups(){
 
 /* ---------- Ficha ---------- */
 const MV = ['Precio sobre EMA150 y EMA200','EMA150 sobre EMA200','EMA200 subiendo (22 velas)','EMA50 sobre EMA150 y EMA200','Precio sobre EMA50',
-  `${P.sobre_min}% o más sobre el mínimo de 252 velas`, `Dentro del ${P.bajo_max}% del máximo de 252 velas`, 'Línea de RS vs SPY sobre su media de 50'];
+  `${P.sobre_min}% o más sobre el mínimo de 252 velas (${P.sobre_min_etf}% en ETFs)`, `Dentro del ${P.bajo_max}% del máximo de 252 velas`, 'Línea de RS vs SPY sobre su media de 50'];
 const MES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
 const mesAnio = f => MES[+f.slice(5,7)-1] + ' ' + f.slice(2,4);
 const crecC = v => v==null ? 'mut' : v>=P.fuerte ? 'up' : v>0 ? 'warn' : 'down';
