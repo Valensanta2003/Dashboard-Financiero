@@ -3,10 +3,10 @@
 PRECIO_MINIMO = 10
 ADR_MINIMO = 2.0
 ADR_PERIODO = 20
-MIN_CRITERIOS_MINERVINI = 7
-EXIGIR_RS = True
-PCT_SOBRE_MINIMO_52S = 30
-PCT_DEBAJO_MAXIMO_52S = 30
+MIN_CRITERIOS_MINERVINI = 6
+EXIGIR_RS = False  # True: además del X/8, exige RS Rating de RS_MINIMO o más
+PCT_SOBRE_MINIMO_52S = 25
+PCT_DEBAJO_MAXIMO_52S = 25
 RS_MINIMO = 70
 EXIGIR_AVWAP = True
 ANCLAS_FUERTES = "Earnings, Episodic pivot, Máx. estructural, Máx. histórico"
@@ -102,6 +102,13 @@ CRIPTO = {
     "DOT-USD": "Polkadot", "LTC-USD": "Litecoin", "TRX-USD": "Tron", "NEAR-USD": "Near", "ATOM-USD": "Cosmos",
     "UNI7083-USD": "Uniswap", "AAVE-USD": "Aave", "XLM-USD": "Stellar", "HBAR-USD": "Hedera",
 }
+# ETF de referencia: primero por industria (más específico), si no por sector
+ETF_INDUSTRIA = {"Semiconductors": "SMH", "Semiconductor Equipment & Materials": "SMH", "Software - Infrastructure": "IGV",
+                 "Software - Application": "IGV", "Biotechnology": "XBI", "Banks - Regional": "KRE", "Residential Construction": "ITB",
+                 "Gold": "GDX", "Solar": "TAN", "Uranium": "URA"}
+ETF_SECTOR = {"Tecnología": "XLK", "Financiero": "XLF", "Energía": "XLE", "Salud": "XLV", "Industria": "XLI",
+              "Consumo discrecional": "XLY", "Consumo básico": "XLP", "Servicios públicos": "XLU", "Materiales": "XLB",
+              "Inmobiliario": "XLRE", "Comunicaciones": "XLC"}
 RESPALDO = ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX","CRM","ORCL","ADBE","NOW","PLTR",
             "ANET","TSM","MU","AMAT","LRCX","KLAC","SHOP","UBER","COIN","HOOD","JPM","GS","MS","V","MA","LLY","ABBV",
             "UNH","ISRG","XOM","CVX","CAT","GE","DE","BA","COST","WMT","HD","NKE","DIS","TWLO","NBIS","CLS","GRMN","BIIB"]
@@ -343,26 +350,56 @@ def adr_pct(df, n=None):
     r = (df.High / df.Low).iloc[-n:]
     return (r.mean() - 1) * 100 if len(r) else 0.0
 
-def minervini(df, rs):
+def pendiente(s, n):
+    """Como el indicador de TradingView: 2 sube y sostenida (vs hace n velas), 1 sube solo hoy, -1 baja solo hoy, -2 baja y sostenida."""
+    s = s.dropna()
+    if len(s) <= n: return None
+    if s.iloc[-1] > s.iloc[-2]: return 2 if s.iloc[-1] > s.iloc[-1 - n] else 1
+    return -2 if s.iloc[-1] < s.iloc[-1 - n] else -1
+
+def minervini(df, spy):
+    """Los 8 criterios del "Minervini Trend Compact v2.3" de TradingView: EMAs, extremos de 252 velas y línea de RS vs SPY."""
     c = df.Close; p = c.iloc[-1]
-    s50, s150, s200 = sma(c, 50), sma(c, 150), sma(c, 200)
-    ult = df[df.index >= df.index[-1] - pd.Timedelta(days=365)]
-    hi, lo = ult.High.max(), ult.Low.min()
-    g = lambda s, i=-1: s.iloc[i] if len(s) >= abs(i) else np.nan
+    e = {n: ema(c, n) for n in (10, 20, 50, 150, 200)}
+    g = lambda n: e[n].iloc[-1]
+    u = df.iloc[-252:]
+    hi, lo = u.High.max(), u.Low.min()
+    v200 = e[200]
+    # ta.rising(v200, 22): la EMA200 de hoy es mayor que cada uno de los 22 valores anteriores
+    sube200 = len(v200) > 22 and v200.iloc[-1] > v200.iloc[-23:-1].max()
+    rs_linea = False
+    if spy is not None:
+        lin = c / spy.reindex(c.index).ffill()
+        m = lin.rolling(50).mean().iloc[-1]
+        rs_linea = not pd.isna(m) and lin.iloc[-1] > m
     checks = [
-        p > g(s150) and p > g(s200),
-        g(s150) > g(s200),
-        g(s200) > g(s200, -22),
-        g(s50) > g(s150) and g(s50) > g(s200),
-        p > g(s50),
+        p > g(150) and p > g(200),
+        g(150) > g(200),
+        sube200,
+        g(50) > g(150) and g(50) > g(200),
+        p > g(50),
         p >= lo * (1 + PCT_SOBRE_MINIMO_52S / 100),
         p >= hi * (1 - PCT_DEBAJO_MAXIMO_52S / 100),
-        rs >= RS_MINIMO,
+        rs_linea,
     ]
-    return [bool(x) for x in checks], hi, lo
+    return [bool(x) for x in checks], hi, lo, e
 
-def pasa_minervini(checks):
-    return sum(checks) >= MIN_CRITERIOS_MINERVINI and (checks[7] or not EXIGIR_RS)
+def pasa_minervini(checks, rs):
+    return sum(checks) >= MIN_CRITERIOS_MINERVINI and (rs >= RS_MINIMO or not EXIGIR_RS)
+
+def tecnico(df, wk, e):
+    """Pendientes de EMAs, momentum 35-5 diario y semanal, y volumen estilo MarketSmith."""
+    c, v = df.Close, df.Volume
+    mom = lambda x: ema(x, 5) - ema(x, 35)
+    v50 = v.rolling(50).mean().iloc[-1]
+    u = df.iloc[-51:]; ch = u.Close.diff().iloc[1:]; vv = u.Volume.iloc[1:]
+    up, dn = vv[ch > 0].sum(), vv[ch < 0].sum()
+    return {
+        "pend": [pendiente(e[n], k) for n, k in ((10, 3), (20, 5), (50, 10), (150, 20), (200, 22))],
+        "m1d": pendiente(mom(c), 5), "m1w": pendiente(mom(wk.Close), 4) if len(wk) > 40 else None,
+        "vol_hoy": num(v.iloc[-1], 0), "vol_pct": num((v.iloc[-1] / v50 - 1) * 100, 0) if v50 > 0 else None,
+        "ud50": num(up / dn, 2) if dn > 0 else None,
+    }
 
 # ---------------------------------------------------------------- episodic pivots, banderas, estadio
 def episodic(df, ventana=10):
@@ -877,11 +914,14 @@ def correr():
                   [diario[t] for t in paso if es_acc(t)])
     paso = [t for t in paso if adr_pct(diario[t]) >= ADR_MINIMO]
     embudo.append((f"ADR ≥ {ADR_MINIMO:g}%", len(paso)))
+    spy = diario.get("SPY")
+    if spy is None: spy = extra.get("SPY")
+    spy_c = spy.Close if spy is not None else None
     cand = {}
     for t in paso:
-        checks, hi, lo = minervini(diario[t], rs_pct[t])
-        if pasa_minervini(checks):
-            cand[t] = (checks, hi, lo)
+        checks, hi, lo, _ = minervini(diario[t], spy_c)
+        if pasa_minervini(checks, rs_pct[t]):
+            cand[t] = True
     embudo.append((f"Minervini {MIN_CRITERIOS_MINERVINI}/8", len(cand)))
     print("   " + " → ".join(f"{n} {k}" for k, n in embudo))
     print("4/5 Historia completa, earnings y AVWAP de los candidatos…")
@@ -889,10 +929,13 @@ def correr():
     activos = []
     dfs_d = {}
     hoy = pd.Timestamp.now()
-    for t, (checks, hi, lo) in cand.items():
+    for t in cand:
         tipo = info.at[t, "tipo"]
         df = hist.get(t)
         if df is None or len(df) < len(diario[t]): df = diario[t]
+        # Con la historia completa las EMA150/200 quedan iguales a las de TradingView; se vuelve a chequear el X/8
+        checks, hi, lo, e = minervini(df, spy_c)
+        if not pasa_minervini(checks, rs_pct[t]): continue
         wk = semanal(df, tipo == "cripto")
         dfs_d[t] = df
         earn, prox = (fechas_earnings(t) if (BUSCAR_EARNINGS and tipo == "accion") else (None, None))
@@ -918,7 +961,8 @@ def correr():
             "industria": pf.get("industria"), "tipo": tipo, "mcap": num(pf["mcap"], 0) if pf.get("mcap") else None,
             "vol50": num(liq[t][1], 0) if t in liq else None, "dvol50": num(liq[t][2], 0) if t in liq else None,
             "precio": num(c.iloc[-1], 4), "chg": num((c.iloc[-1] / c.iloc[-2] - 1) * 100),
-            "ret21": num(ret21[t] * 100, 1), "rs": num(rs, 0), "mv": sum(checks), "mv_checks": checks,
+            "ret21": num(ret21[t] * 100, 1), "rs": num(rs, 0), "mv": sum(checks), "mv_checks": checks, **tecnico(df, wk, e),
+            "off_hi": num((c.iloc[-1] / hi - 1) * 100, 1),
             "hi52": num(hi, 4), "lo52": num(lo, 4), "pos52": num((c.iloc[-1] - lo) / (hi - lo) * 100 if hi > lo else 100, 0),
             "avwap": av, "comp": comp, "inside": ins, "setup_av": sav, "pivot30": None, "vcp": vcp, "sin_av": sin_av,
             "earn_prox": prox.strftime("%d-%m-%Y") if prox is not None else None,
@@ -928,6 +972,11 @@ def correr():
             "estadio": estadio(df), "flags": banderas(df, sav["d"], earn_dias),
             "spark_d": spark(c, 63), "spark_w": spark(wk.Close, 30), "_r21p": float(r21_pct.get(t, 50)),
         })
+    for a in activos:
+        etf = ETF_INDUSTRIA.get(a.get("industria") or "") or ETF_SECTOR.get(a["sector"])
+        d = diario.get(etf) if etf else None
+        a["etf"] = {"t": etf, "rs": num(rs_pct.get(etf), 0) if etf in rs_pct.index else None,
+                    "chg": num((d.Close.iloc[-1] / d.Close.iloc[-2] - 1) * 100) if d is not None and len(d) > 1 else None} if etf else None
     n_req = sum(1 for a in activos if not a["sin_av"])
     embudo.append(("Cumplen todo", n_req))
     print(f"   {n_req} cumplen todos los requisitos")
@@ -1066,6 +1115,17 @@ input[type=search]{background:var(--card);border:1px solid var(--line);border-ra
 h2.sec{font-size:18px;margin:28px 0 12px;font-weight:700;display:flex;align-items:baseline;gap:10px}
 h2.sec small{color:var(--muted);font-weight:500;font-size:13px}
 .nota{color:var(--muted);font-size:13.5px;margin:-4px 0 14px;max-width:85ch}
+.tend{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.x8{font-weight:800;font-variant-numeric:tabular-nums}.x8.warn{color:#EF6C00}
+.ars{display:inline-flex;gap:2px;align-items:center}.ars i{width:4px}
+.ar{display:inline-block;width:15px;text-align:center;border-radius:4px;font-size:9px;line-height:15px;color:var(--muted)}
+.ar.s2{color:#fff;background:#1B5E20}.ar.s1{color:#81C784;background:rgba(129,199,132,.18)}
+.ar.b1{color:#E57373;background:rgba(229,115,115,.18)}.ar.b2{color:#fff;background:#B71C1C}
+.adr0{color:var(--muted)}.adr1{color:#81C784}.adr2{color:#2fa65a;font-weight:700}.adr3{color:#EF6C00;font-weight:700}.adr4{color:#E5484D;font-weight:700}
+.tv{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:3px;margin-top:6px;text-align:center;font-size:11px}
+.tv span{color:var(--muted)}.tv b{display:block;border-radius:4px;padding:2px 0;font-size:11px}
+.tv b.ok{color:#2fa65a;background:rgba(129,199,132,.18)}.tv b.no{color:#E57373;background:rgba(229,115,115,.18)}
+.tv .ar{width:100%;font-size:11px;line-height:18px}
 .embudo{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
 .embudo .paso{display:flex;flex-direction:column;min-width:0}
 .embudo .paso b{font-size:20px;font-variant-numeric:tabular-nums}
@@ -1287,6 +1347,15 @@ function spark(arr, w=84, h=24){
 }
 const flags = (a, max=2) => (a.flags||[]).slice(0,max).map(f=>`<span class="fl ${f.tipo}" title="${esc(f.t)}">${esc(f.c)}</span>`).join('');
 const tk = (a, fl=true) => `<span class="tk">${esc(a.t)}</span>${fl ? flags(a) : ''}`;
+const ARR = {2:['▲','s2'],1:['▲','s1'],'-1':['▼','b1'],'-2':['▼','b2']};
+const flecha = (v, t='') => { const x = ARR[v]; return x ? `<span class="ar ${x[1]}" title="${t}">${x[0]}</span>` : `<span class="ar" title="${t}">–</span>`; };
+const xo8 = a => `<span class="x8 ${a.mv>=7?'up':a.mv>=5?'warn':'down'}">${a.mv}/8</span>`;
+const EMAS_N = ['E10','E20','E50','E150','E200'];
+const tend = a => `<span class="tend">${xo8(a)}<span class="ars">${(a.pend||[]).map((v,i)=>flecha(v,EMAS_N[i])).join('')}<i></i>${flecha(a.m1d,'Momentum diario')}${flecha(a.m1w,'Momentum semanal')}</span></span>`;
+const adrC = v => v==null ? '<span class="mut">s/d</span>' : `<span class="adr${v<1.5?0:v<2.5?1:v<4.5?2:v<6?3:4}">${fmt(v,2)}%</span>`;
+const volx = a => a.vol_pct==null ? '–' : `<span class="${a.vol_pct>0?'up':'mut'}">${pct(a.vol_pct,0)}</span>`;
+const TEND = {h:'Tendencia', f:r=>tend(r.a)};
+const VOLX = {h:'Vol. vs prom. 50', n:1, f:r=>volx(r.a)};
 const barra = v => `<span class="sc"><span class="barra"><i style="width:${Math.max(0,Math.min(100,v))}%"></i></span><span>${fmt(v,0)}</span></span>`;
 function ring(v, size=70, col='var(--acc)'){
   const r = size/2-6, c = 2*Math.PI*r;
@@ -1344,6 +1413,7 @@ function vInicio(){
   const fl = (D.foco||[]).filter(f=>idx[f.t] && visibles(true).includes(idx[f.t]));
   const cFo = [
     {h:'Ticker', f:r=>tk(idx[r.t])},
+    TEND,
     {h:'Setup', f:r=>esc(r.setup)},
     {h:'Entrada', n:1, f:r=>pr(r.entrada)},
     {h:'Stop', n:1, f:r=>pr(r.stop)},
@@ -1386,11 +1456,13 @@ function vSectores(){
   const cols = [
     {h:'', f:r=>`<span class="rk">${r.i+1}</span>`},
     {h:'Ticker', f:r=>tk(r.a)},
+    TEND,
     {h:'3 meses', f:r=>spark(r.a.spark_d)},
     {h:'Calor', n:1, f:r=>fmt(r.a.calor,0)},
     {h:'Score', n:1, f:r=>fmt(r.a.score,0)},
     {h:'RS', n:1, f:r=>fmt(r.a.rs,0)},
-    {h:'ADR', n:1, f:r=>fmt(r.a.adr,1)+'%'},
+    {h:'ADR', n:1, f:r=>adrC(r.a.adr)},
+    VOLX,
     {h:'AVWAP', f:r=>{const m=mejorAv(r.a,tf); return m ? `${badge(m.estado)} <span class="mut">${esc(m.ancla)}</span>` : '<span class="mut">–</span>';}},
     {h:'1 mes', n:1, f:r=>`<span class="${cls(r.a.ret21)}">${pct(r.a.ret21,1)}</span>`},
   ];
@@ -1404,11 +1476,13 @@ function vAvwap(){
   visibles().forEach(a => (a.avwap[tf]||[]).filter(x=>x.cuenta).forEach(x => rows.push({a, x})));
   const cols = [
     {h:'Ticker', f:r=>tk(r.a)},
+    TEND,
     {h:'Anclada en', f:r=>`${esc(r.x.ancla)}${r.x.fuerte?'<span class="fuerte">★</span>':''} <span class="mut">${esc(r.x.fecha)}</span>`},
     {h:'AVWAP', n:1, f:r=>pr(r.x.valor)},
     {h:'Precio', n:1, f:r=>pr(r.a.precio)},
     {h:'Distancia', n:1, f:r=>`<span class="${cls(r.x.dist)}">${pct(r.x.dist)}</span>`},
     {h:'Vol. ruptura', n:1, f:r=>r.x.vol_x!=null ? fmt(r.x.vol_x,1)+'x' : '–'},
+    VOLX,
     {h:'Objetivo', n:1, f:r=>r.x.objetivo ? pr(r.x.objetivo) : '<span class="mut">sin techo</span>'},
     {h:'Score', n:1, f:r=>fmt(r.a.score,0)},
   ];
@@ -1429,9 +1503,11 @@ function vVcp(){
   const F = [['','Todas'],['recien','Recién rompió'],['armada','Armada'],['confirmo','Confirmó'],['sinvol','Sin volumen'],['formandose','Formándose'],['fallo','Falló']];
   const cols = [
     {h:'Ticker', f:r=>tk(r.a)+sinAv(r.a)},
+    TEND,
     {h:'Estado', f:r=>badge(r.a.vcp.estado)},
     {h:'Contracciones', f:r=>contrTxt(r.a.vcp)},
     {h:'Base', n:1, f:r=>fmt(r.a.vcp.semanas,0)+' sem.'},
+    VOLX,
     {h:'Pivot', n:1, f:r=>pr(r.a.vcp.pivot)},
     {h:'Stop', n:1, f:r=>pr(r.a.vcp.stop)},
     {h:'Riesgo', n:1, f:r=>fmt(r.a.vcp.riesgo,1)+'%'},
@@ -1468,10 +1544,12 @@ function vComp(){
   const k = tf==='d' ? ['ATR 10/50','Vol 10/50','Rango 10'] : ['ATR 4/20','Vol 4/20','Rango 6'];
   const cols = [
     {h:'Ticker', f:r=>tk(r.a)+sinAv(r.a)},
+    TEND,
     {h:tf==='d'?'3 meses':'30 semanas', f:r=>spark(tf==='d'?r.a.spark_d:r.a.spark_w)},
     {h:'Compresión', f:r=>barra(r.a.comp[tf].score)+(r.a.comp[tf].ruptura?' '+badge('rompio'):'')},
     {h:k[0], n:1, f:r=>fmt(r.a.comp[tf].atr_r)},
     {h:'Ancho BB pctil', n:1, f:r=>fmt(r.a.comp[tf].bb_pct,0)},
+    VOLX,
     {h:k[1], n:1, f:r=>`<span class="${r.a.comp[tf].vol_r<1?'up':'mut'}">${fmt(r.a.comp[tf].vol_r)}</span>`},
     {h:k[2], n:1, f:r=>fmt(r.a.comp[tf].rango,1)+'%'},
     {h:'Gatillo', n:1, f:r=>pr(r.a.comp[tf].gatillo)},
@@ -1492,6 +1570,7 @@ function vInside(){
     .sort((x,y)=>(y.inside[tf].n-x.inside[tf].n) || (y.comp[tf].score-x.comp[tf].score));
   const cols = [
     {h:'Ticker', f:r=>tk(r.a)},
+    TEND,
     {h:'Inside', f:r=>`<span class="est ${r.a.inside[tf].n>=2?'rompe':'porromper'}">${r.a.inside[tf].n>=2?'Doble':'Simple'}${r.a.inside[tf].n>2?' ('+r.a.inside[tf].n+')':''}</span>`},
     {h:'Madre máx.', n:1, f:r=>pr(r.a.inside[tf].madre_hi)},
     {h:'Madre mín.', n:1, f:r=>pr(r.a.inside[tf].madre_lo)},
@@ -1513,6 +1592,7 @@ function vEp(){
   const avEp = a => (a.avwap.d||[]).find(x=>x.ancla==='Episodic pivot');
   const cols = [
     {h:'Ticker', f:r=>tk(r.a)},
+    TEND,
     {h:'Cuándo', f:r=>r.a.ep.dias===0 ? '<span class="est rompe">Hoy</span>' : `hace ${r.a.ep.dias} ${r.a.ep.dias===1?'rueda':'ruedas'} <span class="mut">${esc(r.a.ep.fecha)}</span>`},
     {h:'Suba del día', n:1, f:r=>`<span class="up">${pct(r.a.ep.suba,1)}</span>`},
     {h:'Volumen', n:1, f:r=>fmt(r.a.ep.vol_x,1)+'x'},
@@ -1536,6 +1616,7 @@ function vSetups(){
     .sort((p,q)=> (p.s.estado===q.s.estado ? (q.s.rr||0)-(p.s.rr||0) : (p.s.estado==='rompe'?-1:1)));
   const cAv = [
     {h:'Ticker', f:r=>tk(r.a)},
+    TEND,
     {h:'Estado', f:r=>badge(r.s.estado)},
     {h:'Anclada en', f:r=>esc(r.s.ancla)},
     {h:'Entrada', n:1, f:r=>pr(r.s.entrada)},
@@ -1548,6 +1629,7 @@ function vSetups(){
     .sort((p,q)=> (p.e===q.e ? q.a.comp[tf].score-p.a.comp[tf].score : (p.e==='rompio'?-1:1)));
   const cCb = [
     {h:'Ticker', f:r=>tk(r.a)+sinAv(r.a)},
+    TEND,
     {h:'EMAs', f:r=>r.a.comp[tf].emas ? '<span class="up">en ascenso</span>' : '<span class="mut">no</span>'},
     {h:'Estado', f:r=>badge(r.e)},
     {h:'Gatillo', n:1, f:r=>pr(r.a.comp[tf].gatillo)},
@@ -1561,6 +1643,7 @@ function vSetups(){
     .sort((p,q)=> (ORD[p.p.estado]-ORD[q.p.estado]) || ((p.p.riesgo??99)-(q.p.riesgo??99)));
   const cPv = [
     {h:'Ticker', f:r=>tk(r.a)+(r.a.sin_av?'<span class="sin_av" title="No cumple el requisito de AVWAP: aparece solo por este setup">sin AVWAP</span>':'')},
+    TEND,
     {h:'Estado', f:r=>badge(r.p.estado)},
     {h:'EMA diaria', f:r=>`<span class="tk">EMA${r.p.ema_n}</span> <span class="mut">${esc(r.p.toque)} · ${pr(r.p.ema)}</span>`},
     {h:'Entrada (máx. vela verde)', n:1, f:r=>pr(r.p.entrada)},
@@ -1582,8 +1665,8 @@ function vSetups(){
 }
 
 /* ---------- Ficha ---------- */
-const MV = ['Precio sobre SMA150 y SMA200','SMA150 sobre SMA200','SMA200 subiendo hace 1 mes','SMA50 sobre SMA150 y SMA200','Precio sobre SMA50',
-  `${P.sobre_min}% o más sobre el mínimo 52s`, `Dentro del ${P.bajo_max}% del máximo 52s`, `RS ${P.rs_min} o más`];
+const MV = ['Precio sobre EMA150 y EMA200','EMA150 sobre EMA200','EMA200 subiendo (22 velas)','EMA50 sobre EMA150 y EMA200','Precio sobre EMA50',
+  `${P.sobre_min}% o más sobre el mínimo de 252 velas`, `Dentro del ${P.bajo_max}% del máximo de 252 velas`, 'Línea de RS vs SPY sobre su media de 50'];
 function ficha(t){
   const a = D.activos.find(x=>x.t===t); if(!a) return;
   const PT = [['Tendencia','tend',20,'var(--blue)'],['Fuerza RS','rs',25,'var(--acc)'],['Contracción','contr',35,'var(--violet)'],['Setup','setup',20,'var(--warn)']];
@@ -1595,7 +1678,6 @@ function ficha(t){
   $('#ficha').innerHTML = `
     <div class="fh"><div><h2>${esc(a.t)}</h2><p>${esc(a.nombre)} · ${esc(a.sector)}${a.industria?' · '+esc(a.industria):''}</p></div><button class="cerrar" id="cerrar" aria-label="Cerrar ficha">✕</button></div>
     <div class="precio">${pr(a.precio)} <span class="${cls(a.chg)}">${pct(a.chg)}</span></div>
-    ${a.tipo==='accion' ? `<p class="mut" style="margin:4px 0 0">Market cap ${big(a.mcap)} · Vol. prom. 50 ruedas ${big(a.vol50)} acciones, USD ${big(a.dvol50)}</p>` : ''}
     <div style="margin-top:12px">${spark(a.spark_d, 420, 72)}</div>
     ${a.sin_av ? `<p class="nota" style="margin-top:12px">No está rompiendo ni por romper ninguna AVWAP: cumple Minervini, precio y ADR, y aparece solo en VCP, Compresión y 30 Min Pivot.</p>` : ''}
     ${(a.flags||[]).length ? `<h4>Avisos</h4><div class="flist">${a.flags.map(f=>`<div class="${f.tipo}">${esc(f.t)}</div>`).join('')}</div>` : ''}
@@ -1603,6 +1685,18 @@ function ficha(t){
     <div style="display:flex;gap:18px;align-items:center">${ring(a.score, 84)}
       <div class="partes" style="flex:1">${PT.map(([n,k,m,c])=>`<span class="mut">${n}</span><span class="pbar"><i style="width:${a.partes[k]/m*100}%;background:${c}"></i></span><span>${fmt(a.partes[k],1)}/${m}</span>`).join('')}</div></div>
     ${a.castigo>0 ? `<p class="nota" style="margin-top:8px">Descuento de ${fmt(a.castigo,0)} puntos por banderas (estirada, extendido, sin volumen o rechazo).</p>` : ''}
+    <h4>Tendencia · ${xo8(a)}</h4>
+    <div class="tv">${EMAS_N.map((n,i)=>`<div><span>${n}</span>${flecha((a.pend||[])[i],n)}</div>`).join('')}<div><span>M1D</span>${flecha(a.m1d,'Momentum diario')}</div><div><span>M1W</span>${flecha(a.m1w,'Momentum semanal')}</div><div><span>ADR%</span><b>${adrC(a.adr)}</b></div></div>
+    <div class="tv">${a.mv_checks.map((ok,i)=>`<div><span>${i+1}</span><b class="${ok?'ok':'no'}" title="${esc(MV[i])}">${ok?'✓':'✗'}</b></div>`).join('')}</div>
+    <div class="kv" style="margin-top:12px">
+      ${a.tipo==='accion' ? `<span>Market cap</span><span>${big(a.mcap)}</span>` : ''}
+      <span>Desde el máx. de 52 semanas</span><span class="${cls(a.off_hi)}">${pct(a.off_hi,1)}</span>
+      <span>Vol. prom. 50 ruedas</span><span>${a.dvol50!=null?'USD '+big(a.dvol50)+' · ':''}${big(a.vol50)} acciones</span>
+      <span>Volumen hoy</span><span>${big(a.vol_hoy)} · ${volx(a)} vs prom. 50</span>
+      <span>Up/Down volume 50 días</span><span class="${a.ud50>=1?'up':'down'}">${a.ud50!=null?fmt(a.ud50,2):'s/d'}${a.ud50!=null?(a.ud50>=1?' · acumulación':' · distribución'):''}</span>
+      <span>RS Rating</span><span>${fmt(a.rs,0)}</span>
+      ${a.etf ? `<span>ETF del sector</span><span>${esc(a.etf.t)}${a.etf.rs!=null?' · RS '+fmt(a.etf.rs,0):''} · <span class="${cls(a.etf.chg)}">${pct(a.etf.chg)}</span></span>` : ''}
+    </div>
     <h4>Criterios de Minervini · ${a.mv}/8</h4>
     <ul class="checks">${MV.map((l,i)=>`<li><b class="${a.mv_checks[i]?'up':'down'}">${a.mv_checks[i]?'✓':'✗'}</b>${l}</li>`).join('')}</ul>
     <h4>Rango de 52 semanas · ${fmt(a.pos52,0)}%</h4>
@@ -1621,8 +1715,6 @@ function ficha(t){
       ${a.estadio ? `<span>Estadio</span><span>${esc(ESTADIOS[a.estadio])}</span>` : ''}
       ${cmp('d')}${cmp('w')}${ins('d')}${ins('w')}
       ${a.ep ? `<span>Episodic pivot</span><span>${a.ep.dias===0?'hoy':'hace '+a.ep.dias+' ruedas'} · ${pct(a.ep.suba,1)} · ${fmt(a.ep.vol_x,1)}x</span>` : ''}
-      <span>RS</span><span>${fmt(a.rs,0)}</span>
-      <span>ADR% (20 días)</span><span>${fmt(a.adr,2)}%</span>
       <span>Distancia a EMA10 / EMA20</span><span class="${a.adr>0 && (a.d10/a.adr>P.est10 || a.d20/a.adr>P.est20) ? 'down' : ''}">${pct(a.d10,1)} / ${pct(a.d20,1)} · ${a.adr>0?fmt(a.d10/a.adr,1)+' / '+fmt(a.d20/a.adr,1)+' ADR':''}</span>
       <span>Retorno 1 mes</span><span class="${cls(a.ret21)}">${pct(a.ret21,1)}</span>
       ${a.earn_prox ? `<span>Próximos earnings</span><span>${esc(a.earn_prox)}${a.earn_momento?' · '+esc(a.earn_momento):''}</span>` : ''}
@@ -1709,7 +1801,7 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pageshow', e => { if(e.persisted){ avisoViejo(); chequear(); } });
 setInterval(() => { if(document.visibilityState==='visible'){ avisoViejo(); chequear(); } }, 5*60e3);
-$('#pie').innerHTML = `${m.n_universo} activos analizados. Requisitos: al menos ${P.min_mv} de 8 criterios de Minervini (${P.sobre_min}% sobre el mínimo y dentro del ${P.bajo_max}% del máximo de 52 semanas, RS ${P.rs_min}+), precio de ${P.precio_min} USD o más en acciones y ETF, ADR de ${fmt(P.adr_min,1)}% o más${P.exigir_rs ? ' (el RS es obligatorio)' : ''}${P.exigir_av ? ', y una AVWAP rota con volumen o por romper en un ancla fuerte. VCP, Compresión y 30 Min Pivot no exigen AVWAP' : ''}. Horarios en hora de Argentina. Esto es un filtro técnico, no una recomendación de compra.`;
+$('#pie').innerHTML = `${m.n_universo} activos analizados. Requisitos: al menos ${P.min_mv} de 8 criterios de Minervini como en el indicador de TradingView (EMAs, ${P.sobre_min}% sobre el mínimo y dentro del ${P.bajo_max}% del máximo de 252 velas, línea de RS vs SPY sobre su media de 50), precio de ${P.precio_min} USD o más en acciones y ETF, ADR de ${fmt(P.adr_min,1)}% o más${P.exigir_rs ? `, RS Rating de ${P.rs_min} o más` : ''}${P.exigir_av ? ', y una AVWAP rota con volumen o por romper en un ancla fuerte. VCP, Compresión y 30 Min Pivot no exigen AVWAP' : ''}. Horarios en hora de Argentina. Esto es un filtro técnico, no una recomendación de compra.`;
 render();
 </script>
 </body>
