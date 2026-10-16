@@ -51,7 +51,13 @@ EP_MIN_VOL = 2.0
 EXTENDIDO_SMA50 = 25
 ESTIRADA_EMA10_ADR = 2.0
 ESTIRADA_EMA20_ADR = 3.0
+# **Tamaño y liquidez** (promedios de 50 ruedas; 0 = desactivado; no aplica a ETFs ni cripto)
+MARKET_CAP_MIN = 1_000_000_000
+VOLUMEN_DOLARES_MIN = 20_000_000
+VOLUMEN_ACCIONES_MIN = 0
+LIQUIDEZ_ALCANZA_UNO = True  # True: pasa si cumple el volumen en acciones O en dólares; False: tiene que cumplir los dos
 # **Universo**
+UNIVERSO = "completo"  # "completo": todas las acciones y ADRs de EE.UU. (NASDAQ, NYSE, NYSE American, Arca); "indices": los índices de abajo
 INCLUIR_SP500 = True
 INCLUIR_NASDAQ100 = True
 INCLUIR_MIDCAP400 = True
@@ -77,6 +83,8 @@ SECTORES_ES = {
     "Consumer Staples": "Consumo básico", "Industrials": "Industria", "Energy": "Energía",
     "Materials": "Materiales", "Utilities": "Servicios públicos", "Real Estate": "Inmobiliario",
     "Communication Services": "Comunicaciones", "Telecommunications": "Comunicaciones",
+    "Healthcare": "Salud", "Financial Services": "Financiero", "Consumer Cyclical": "Consumo discrecional",
+    "Consumer Defensive": "Consumo básico", "Basic Materials": "Materiales",
 }
 ETFS = {
     "SPY": "S&P 500", "QQQ": "Nasdaq 100", "IWM": "Russell 2000", "DIA": "Dow Jones", "XLK": "Tecnología",
@@ -119,12 +127,39 @@ def _extraer(tablas):
             return filas
     return []
 
+_NO_COMUNES = (r"\b(warrants?|rights?|preferred|pfd|perpetual|debentures?|subordinated|notes? due)\b"
+               r"|(?<!common )\bunits?\b|\d% |depositary shares,? each representing (a |one )?\d*/\d+")
+
+def listado_eeuu():
+    """Acciones comunes y ADRs de NASDAQ, NYSE, NYSE American y Arca según NASDAQ Trader (sin ETFs, warrants, units, rights ni preferidas)."""
+    import requests, re
+    base = "https://www.nasdaqtrader.com/dynamic/SymDir/"
+    partes = []
+    for arch, col in (("nasdaqlisted.txt", "Symbol"), ("otherlisted.txt", "ACT Symbol")):
+        txt = requests.get(base + arch, headers={"User-Agent": "Mozilla/5.0"}, timeout=30).text
+        d = pd.read_csv(io.StringIO(txt), sep="|", dtype=str)
+        d = d[~d.iloc[:, 0].str.startswith("File Creation", na=True)]
+        partes.append(pd.DataFrame({"s": d[col], "n": d["Security Name"], "etf": d["ETF"], "test": d["Test Issue"]}))
+    d = pd.concat(partes)
+    d = d[(d.etf != "Y") & (d.test != "Y") & d.s.notna() & d.n.notna()]
+    d = d[~d.n.str.contains(_NO_COMUNES, flags=re.I, regex=True)]
+    d = d[~d.s.str.contains(r"[$^\s=]", regex=True)]
+    limpiar = lambda n: re.sub(r"\s*[-,]?\s*(Class [A-Z] )?(Common (Stock|Shares|Units)|Ordinary Shares?|American Depositary (Shares|Receipts)).*$", "", n, flags=re.I).strip() or n
+    return [(s.replace(".", "-").replace("/", "-"), limpiar(n), "Sin clasificar", "accion") for s, n in zip(d.s, d.n)]
+
 def obtener_universo():
     filas = []
     fuentes = []
-    if INCLUIR_SP500: fuentes.append("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-    if INCLUIR_NASDAQ100: fuentes.append("https://en.wikipedia.org/wiki/Nasdaq-100")
-    if INCLUIR_MIDCAP400: fuentes.append("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies")
+    if UNIVERSO == "completo":
+        try:
+            filas = listado_eeuu()
+            print(f"  {len(filas)} acciones y ADRs de NASDAQ Trader")
+        except Exception as e:
+            print(f"  ⚠️ No pude leer NASDAQ Trader ({e}); uso los índices")
+    if not filas:
+        if INCLUIR_SP500: fuentes.append("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        if INCLUIR_NASDAQ100: fuentes.append("https://en.wikipedia.org/wiki/Nasdaq-100")
+        if INCLUIR_MIDCAP400: fuentes.append("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies")
     for url in fuentes:
         try:
             f = _extraer(_tablas_wiki(url)); filas += f
@@ -142,16 +177,22 @@ def obtener_universo():
     return u.reset_index(drop=True)
 
 # ---------------------------------------------------------------- datos
-def descargar(tickers, period, interval, chunk=80):
+def descargar(tickers, period, interval, chunk=80, reintento=True):
+    """Baja velas en lotes. Si Yahoo corta o limita, espera y reintenta; al final vuelve a pedir una vez los que faltan."""
     datos = {}
     tickers = list(dict.fromkeys(tickers))
     for i in range(0, len(tickers), chunk):
         grupo = tickers[i:i + chunk]
-        try:
-            df = yf.download(grupo, period=period, interval=interval, group_by="ticker",
-                             auto_adjust=True, threads=True, progress=False)
-        except Exception as e:
-            print("  ⚠️", e); continue
+        df = None
+        for intento in range(3):
+            try:
+                df = yf.download(grupo, period=period, interval=interval, group_by="ticker",
+                                 auto_adjust=True, threads=True, progress=False)
+                break
+            except Exception as e:
+                print(f"  ⚠️ lote {i // chunk + 1}: {e}; espero {15 * (intento + 1)} s")
+                time.sleep(15 * (intento + 1))
+        if df is None: continue
         for t in grupo:
             try:
                 sub = df[t] if isinstance(df.columns, pd.MultiIndex) else df
@@ -162,7 +203,15 @@ def descargar(tickers, period, interval, chunk=80):
                 if len(sub): datos[t] = sub.astype(float)
             except Exception:
                 pass
-        print(f"  {min(i + chunk, len(tickers))}/{len(tickers)}")
+        hechos = min(i + chunk, len(tickers))
+        if len(tickers) <= 10 * chunk or hechos % (10 * chunk) == 0 or hechos == len(tickers):
+            print(f"  {hechos}/{len(tickers)}")
+    faltan = [t for t in tickers if t not in datos]
+    # Si faltan muchos suele ser un límite de Yahoo, no tickers muertos: una segunda pasada los recupera
+    if reintento and faltan and len(faltan) > max(5, 0.03 * len(tickers)):
+        print(f"  Reintento {len(faltan)} que no bajaron…")
+        time.sleep(20)
+        datos.update(descargar(faltan, period, interval, chunk=max(20, chunk // 2), reintento=False))
     return datos
 
 _CACHE_EARN = None
@@ -198,6 +247,66 @@ def _earnings_yahoo(t):
         return (pas.max().normalize() if len(pas) else None, fut.min() if len(fut) else None)
     except Exception:
         return None, None
+
+# ---------------------------------------------------------------- perfil: market cap, sector, industria
+ARCHIVO_PERFILES = "sectores_cache.json"
+PERFIL_DIAS = 30        # cada cuánto se vuelve a pedir un perfil (el market cap se ajusta por precio entre medio)
+PERFIL_MAX_CORRIDA = 2500  # tope de consultas nuevas por corrida; las que quedan se piden en la siguiente
+
+def _perfil_yahoo(t):
+    try:
+        i = yf.Ticker(t).info or {}
+    except Exception:
+        return None
+    if not i: return None
+    px = i.get("currentPrice") or i.get("regularMarketPrice") or i.get("previousClose")
+    return {"dia": dt.date.today().isoformat(), "mcap": i.get("marketCap"), "px": px,
+            "sector": i.get("sector"), "ind": i.get("industry"), "nom": i.get("shortName") or i.get("longName")}
+
+def perfiles(tickers, precios):
+    """{ticker: {mcap, sector, industria, nombre}} desde yfinance con caché en sectores_cache.json.
+    Solo consulta los que faltan o están vencidos; el market cap se reescala con el precio de hoy."""
+    from concurrent.futures import ThreadPoolExecutor
+    try: cache = json.load(open(ARCHIVO_PERFILES))
+    except Exception: cache = {}
+    limite = (dt.date.today() - dt.timedelta(days=PERFIL_DIAS)).isoformat()
+    pedir = [t for t in tickers if t not in cache or cache[t].get("dia", "") < limite][:PERFIL_MAX_CORRIDA]
+    if pedir:
+        print(f"   Perfil de {len(pedir)} acciones (market cap, sector e industria)…")
+        hechos = 0
+        # Yahoo responde "Invalid Crumb" si muchas consultas arrancan juntas: la primera va sola para fijar la sesión,
+        # después pocos hilos, y una segunda pasada más lenta para las que fallaron
+        for pasada, hilos in ((1, 4), (2, 2)):
+            if pasada == 2:
+                if not pedir: break
+                print(f"   Reintento {len(pedir)} perfiles…"); time.sleep(10)
+            _perfil_yahoo(pedir[0])
+            with ThreadPoolExecutor(max_workers=hilos) as ex:
+                res = list(ex.map(_perfil_yahoo, pedir))
+            for t, p in zip(pedir, res):
+                if p: cache[t] = p; hechos += 1
+            pedir = [t for t, p in zip(pedir, res) if not p]
+        print(f"   {hechos} perfiles nuevos ({len(pedir)} sin respuesta, se reintentan la próxima corrida)")
+        try: json.dump(cache, open(ARCHIVO_PERFILES, "w"))
+        except Exception: pass
+    out = {}
+    for t in tickers:
+        c = cache.get(t)
+        if not c: continue
+        mcap = c.get("mcap")
+        if mcap and c.get("px") and precios.get(t): mcap = mcap * precios[t] / c["px"]
+        sec = c.get("sector")
+        out[t] = {"mcap": mcap, "sector": SECTORES_ES.get(sec, sec) if sec else None, "industria": c.get("ind"), "nombre": c.get("nom")}
+    return out
+
+def liquida(df):
+    """Volumen promedio de 50 ruedas en acciones y en dólares contra los mínimos de CONFIGURACIÓN."""
+    u = df.iloc[-50:]
+    v50, d50 = u.Volume.mean(), (u.Close * u.Volume).mean()
+    pruebas = [x for x in ((VOLUMEN_ACCIONES_MIN, v50), (VOLUMEN_DOLARES_MIN, d50)) if x[0] > 0]
+    if not pruebas: return True, v50, d50
+    ok = [v >= m for m, v in pruebas]
+    return (any(ok) if LIQUIDEZ_ALCANZA_UNO else all(ok)), v50, d50
 
 # ---------------------------------------------------------------- indicadores
 def sma(s, n): return s.rolling(n).mean()
@@ -744,22 +853,37 @@ def correr():
             rs_raw[t] = rs_bruto(df.Close)
             ret21[t] = df.Close.iloc[-1] / df.Close.iloc[-22] - 1
     rs_pct = pd.Series(rs_raw).rank(pct=True) * 98 + 1
+    r21_pct = pd.Series(ret21).rank(pct=True) * 100
+    print("3/5 Embudo: precio, liquidez, market cap, ADR y Minervini…")
+    es_acc = lambda t: info.at[t, "tipo"] == "accion"
+    paso = [t for t in diario if t in rs_pct.index]
+    embudo = [("Con datos", len(paso))]
+    paso = [t for t in paso if info.at[t, "tipo"] == "cripto" or diario[t].Close.iloc[-1] >= PRECIO_MINIMO]
+    embudo.append((f"Precio ≥ {PRECIO_MINIMO}", len(paso)))
+    liq = {}
+    for t in paso:
+        if es_acc(t): liq[t] = liquida(diario[t])
+    paso = [t for t in paso if not es_acc(t) or liq[t][0]]
+    embudo.append(("Liquidez", len(paso)))
+    perf = perfiles([t for t in paso if es_acc(t)], {t: float(diario[t].Close.iloc[-1]) for t in paso})
+    if MARKET_CAP_MIN > 0:
+        # Sin dato de market cap no se descarta (se muestra s/d)
+        paso = [t for t in paso if not es_acc(t) or not (perf.get(t) or {}).get("mcap") or perf[t]["mcap"] >= MARKET_CAP_MIN]
+        embudo.append((f"Market cap ≥ {MARKET_CAP_MIN / 1e9:g} B", len(paso)))
     print("   Régimen de mercado…")
     extra = descargar(["SPY", "QQQ", "^VIX"], "2y", "1d")
+    # La amplitud se mide sobre las acciones líquidas, no sobre las micro caps del listado completo
     reg = regimen({t: diario.get(t, extra.get(t)) for t in ("SPY", "QQQ")}, extra.get("^VIX"),
-                  [d for t, d in diario.items() if info.at[t, "tipo"] == "accion"])
-    r21_pct = pd.Series(ret21).rank(pct=True) * 100
-    print("3/5 Aplicando Minervini, precio mínimo y ADR…")
+                  [diario[t] for t in paso if es_acc(t)])
+    paso = [t for t in paso if adr_pct(diario[t]) >= ADR_MINIMO]
+    embudo.append((f"ADR ≥ {ADR_MINIMO:g}%", len(paso)))
     cand = {}
-    for t, df in diario.items():
-        if t not in rs_pct.index: continue
-        tipo = info.at[t, "tipo"]
-        if tipo != "cripto" and df.Close.iloc[-1] < PRECIO_MINIMO: continue
-        if adr_pct(df) < ADR_MINIMO: continue
-        checks, hi, lo = minervini(df, rs_pct[t])
+    for t in paso:
+        checks, hi, lo = minervini(diario[t], rs_pct[t])
         if pasa_minervini(checks):
             cand[t] = (checks, hi, lo)
-    print(f"   {len(cand)} pasan Minervini ({MIN_CRITERIOS_MINERVINI}/8), precio y ADR")
+    embudo.append((f"Minervini {MIN_CRITERIOS_MINERVINI}/8", len(cand)))
+    print("   " + " → ".join(f"{n} {k}" for k, n in embudo))
     print("4/5 Historia completa, earnings y AVWAP de los candidatos…")
     hist = descargar(list(cand), "max", "1d") if cand else {}
     activos = []
@@ -788,9 +912,11 @@ def correr():
         if sin_av and not vcp and not comprimida and not (ANALIZAR_30M and toque_ema_diaria(df)): continue
         ins = {"d": inside(df), "w": inside(wk)}
         sav = {"d": setup_avwap(df, av["d"]), "w": setup_avwap(wk, av["w"])}
-        rs = float(rs_pct[t]); c = df.Close
+        rs = float(rs_pct[t]); c = df.Close; pf = perf.get(t) or {}
         activos.append({
-            "t": t, "nombre": str(info.at[t, "nombre"]), "sector": str(info.at[t, "sector"]), "tipo": tipo,
+            "t": t, "nombre": str(pf.get("nombre") or info.at[t, "nombre"]), "sector": str(pf.get("sector") or info.at[t, "sector"]),
+            "industria": pf.get("industria"), "tipo": tipo, "mcap": num(pf["mcap"], 0) if pf.get("mcap") else None,
+            "vol50": num(liq[t][1], 0) if t in liq else None, "dvol50": num(liq[t][2], 0) if t in liq else None,
             "precio": num(c.iloc[-1], 4), "chg": num((c.iloc[-1] / c.iloc[-2] - 1) * 100),
             "ret21": num(ret21[t] * 100, 1), "rs": num(rs, 0), "mv": sum(checks), "mv_checks": checks,
             "hi52": num(hi, 4), "lo52": num(lo, 4), "pos52": num((c.iloc[-1] - lo) / (hi - lo) * 100 if hi > lo else 100, 0),
@@ -803,6 +929,7 @@ def correr():
             "spark_d": spark(c, 63), "spark_w": spark(wk.Close, 30), "_r21p": float(r21_pct.get(t, 50)),
         })
     n_req = sum(1 for a in activos if not a["sin_av"])
+    embudo.append(("Cumplen todo", n_req))
     print(f"   {n_req} cumplen todos los requisitos")
     con30 = bool(ANALIZAR_30M and activos)
     if con30:
@@ -828,7 +955,7 @@ def correr():
     fechas = [df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto"] or [hoy]
     datos = {"meta": {
         "fecha_datos": max(fechas).strftime("%d-%m-%Y"), "generado": ahora_ar().strftime("%d-%m-%Y %H:%M"),
-        "n_universo": len(diario), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
+        "n_universo": len(diario), "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
         "params": {"min_mv": MIN_CRITERIOS_MINERVINI, "sobre_min": PCT_SOBRE_MINIMO_52S, "bajo_max": PCT_DEBAJO_MAXIMO_52S,
                    "rs_min": RS_MINIMO, "precio_min": PRECIO_MINIMO, "exigir_av": EXIGIR_AVWAP,
                    "dist_d": DIST_POR_ROMPER_DIARIO, "dist_w": DIST_POR_ROMPER_SEMANAL,
@@ -939,6 +1066,11 @@ input[type=search]{background:var(--card);border:1px solid var(--line);border-ra
 h2.sec{font-size:18px;margin:28px 0 12px;font-weight:700;display:flex;align-items:baseline;gap:10px}
 h2.sec small{color:var(--muted);font-weight:500;font-size:13px}
 .nota{color:var(--muted);font-size:13.5px;margin:-4px 0 14px;max-width:85ch}
+.embudo{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.embudo .paso{display:flex;flex-direction:column;min-width:0}
+.embudo .paso b{font-size:20px;font-variant-numeric:tabular-nums}
+.embudo .paso span{color:var(--muted);font-size:12.5px}
+.embudo i{color:var(--muted);font-style:normal}
 
 /* KPIs */
 .kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
@@ -1112,6 +1244,7 @@ const P = D.meta.params;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt = (v,d=2) => (v==null||isNaN(v)) ? '–' : Number(v).toLocaleString('es-AR',{minimumFractionDigits:d,maximumFractionDigits:d});
+const big = v => v==null ? 's/d' : v>=1e12 ? fmt(v/1e12,2)+' T' : v>=1e9 ? fmt(v/1e9,1)+' B' : v>=1e6 ? fmt(v/1e6,1)+' M' : fmt(v/1e3,0)+' k';
 const pr = v => v==null ? '–' : fmt(v, v<1 ? 4 : 2);
 const pct = (v,d=2) => (v==null||isNaN(v)) ? '–' : (v>0?'+':'')+fmt(v,d)+'%';
 const cls = v => v>0 ? 'up' : v<0 ? 'down' : 'mut';
@@ -1188,6 +1321,7 @@ function gauge(v){
     <path d="M10 100 A90 90 0 0 1 190 100" fill="none" stroke="var(--line)" stroke-width="14" stroke-linecap="round"/>
     <path d="M10 100 A90 90 0 0 1 190 100" fill="none" stroke="${col}" stroke-width="14" stroke-linecap="round" stroke-dasharray="${(L*v/100).toFixed(1)} ${L.toFixed(1)}"/></svg>`;
 }
+const m0 = E => E.length ? E[0][1] : 0;
 function vInicio(){
   const act = visibles(), tf = S.tf, R = D.meta.regimen;
   let rom=0; act.forEach(a => { const m = mejorAv(a, tf); if(m && m.estado==='rompe') rom++; });
@@ -1230,7 +1364,11 @@ function vInicio(){
       <span>${esc(a.earn_prox)} · ${a.earn_dias===0?'hoy':a.earn_dias===1?'mañana':'en '+a.earn_dias+' días'}</span>
       ${a.earn_momento?`<em class="${a.earn_momento.startsWith('antes')?'bmo':''}">${esc(a.earn_momento)}</em>`:''}</div>`).join('')}</div>`
     : '<p class="vacio">Ningún activo de la lista reporta en los próximos 7 días.</p>';
-  return `${foco}<div class="grid inicio">${reg}${kpis}</div>
+  const E = D.meta.embudo || [];
+  const emb = E.length ? card('Embudo de filtros', `${fmt(m0(E),0)} activos analizados`,
+    `<div class="embudo">${E.map(([k,n],i)=>`<div class="paso"><b>${fmt(n,0)}</b><span>${esc(k)}</span></div>${i<E.length-1?'<i>→</i>':''}`).join('')}</div>`
+    + (D.meta.n_extra ? `<p class="nota" style="margin:10px 0 0">Además, ${D.meta.n_extra} sin AVWAP activa aparecen solo en VCP, Compresión o 30 Min Pivot.</p>` : '')) : '';
+  return `${foco}<div class="grid inicio">${reg}${kpis}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
     <h2 class="sec">Top 3 del score</h2>${spot}
     <h2 class="sec">Earnings próximos <small>7 días · activos que cumplen los requisitos</small></h2>
     ${card('Calendario', ev.length+(ev.length===1?' reporte':' reportes'), earn)}`;
@@ -1455,8 +1593,9 @@ function ficha(t){
   const cmp = tf => a.comp[tf] ? `<span>Compresión ${TFN[tf]}</span><span>${fmt(a.comp[tf].score,0)}${a.comp[tf].es?' · comprimida':''}</span>` : '';
   const ins = tf => `<span>Inside ${tf==='d'?'day':'week'}</span><span>${a.inside[tf] && a.inside[tf].n ? a.inside[tf].n : 'no'}</span>`;
   $('#ficha').innerHTML = `
-    <div class="fh"><div><h2>${esc(a.t)}</h2><p>${esc(a.nombre)} · ${esc(a.sector)}</p></div><button class="cerrar" id="cerrar" aria-label="Cerrar ficha">✕</button></div>
+    <div class="fh"><div><h2>${esc(a.t)}</h2><p>${esc(a.nombre)} · ${esc(a.sector)}${a.industria?' · '+esc(a.industria):''}</p></div><button class="cerrar" id="cerrar" aria-label="Cerrar ficha">✕</button></div>
     <div class="precio">${pr(a.precio)} <span class="${cls(a.chg)}">${pct(a.chg)}</span></div>
+    ${a.tipo==='accion' ? `<p class="mut" style="margin:4px 0 0">Market cap ${big(a.mcap)} · Vol. prom. 50 ruedas ${big(a.vol50)} acciones, USD ${big(a.dvol50)}</p>` : ''}
     <div style="margin-top:12px">${spark(a.spark_d, 420, 72)}</div>
     ${a.sin_av ? `<p class="nota" style="margin-top:12px">No está rompiendo ni por romper ninguna AVWAP: cumple Minervini, precio y ADR, y aparece solo en VCP, Compresión y 30 Min Pivot.</p>` : ''}
     ${(a.flags||[]).length ? `<h4>Avisos</h4><div class="flist">${a.flags.map(f=>`<div class="${f.tipo}">${esc(f.t)}</div>`).join('')}</div>` : ''}

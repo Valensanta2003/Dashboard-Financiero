@@ -19,7 +19,7 @@ concurrency:
 jobs:
   radar:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 55
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -36,6 +36,12 @@ jobs:
           path: earnings_cache.json
           key: earnings-${{ github.run_id }}
           restore-keys: earnings-
+      - name: Recuperar caché de market cap y sectores
+        uses: actions/cache@v4
+        with:
+          path: sectores_cache.json
+          key: sectores-${{ github.run_id }}
+          restore-keys: sectores-
       - name: Correr el radar
         run: python radar.py
       - uses: actions/upload-pages-artifact@v3

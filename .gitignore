@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 earnings_cache.json
 sectores_cache.json
+.claude/
