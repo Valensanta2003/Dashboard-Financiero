@@ -30,6 +30,10 @@ TOLERANCIA_TOQUE_EMA = 0.5
 DIAS_TOQUE_EMA = 2
 # **Compresión**
 EMAS_ASCENSO = "10, 20, 50"
+# **Seleccionadas** (las mejores dentro de las que cumplen todo)
+SEL_RS_MIN = 80
+SEL_MINERVINI_MIN = 7
+SEL_SCORE_MIN = 70
 # **Lista de foco y score**
 FOCO_MAXIMO = 10
 FOCO_RS_MINIMO = 80
@@ -1333,7 +1337,7 @@ def correr():
                    "vcp_min": VCP_MIN_CONTRACCIONES, "vcp_ult": VCP_ULTIMA_MAX, "vcp_form": VCP_FORMANDO_MAX, "vcp_dist": VCP_DIST_PIVOT,
                    "vcp_seco": VCP_VOL_SECO, "vcp_dias": VCP_DIAS_RUPTURA, "vcp_seg": VCP_DIAS_SEGUIMIENTO,
                    "vcp_smin": VCP_SEMANAS_MIN, "vcp_smax": VCP_SEMANAS_MAX, "emas_asc": EMAS_ASCENSO,
-                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "top_ruedas": TOP_RUEDAS,
+                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS,
                    "pts": {"tend": PUNTOS_TENDENCIA, "rs": PUNTOS_RS, "contr": PUNTOS_COMPRESION, "setup": PUNTOS_SETUP, "fund": PUNTOS_FUNDAMENTALES}, "est10": ESTIRADA_EMA10_ADR, "est20": ESTIRADA_EMA20_ADR,
                    "foco_rs": FOCO_RS_MINIMO, "foco_riesgo": FOCO_RIESGO_MAX, "foco_max": FOCO_MAXIMO}},
         "foco": foco, "activos": sorted(activos, key=lambda a: -a["score"])}
@@ -1891,7 +1895,27 @@ function vInicio(){
   const lista = (l, c) => `<div class="cart">${l.map(x=>`<div class="ci ${idx2[x.t]?'en':''}" ${idx2[x.t]?`data-t="${esc(x.t)}" tabindex="0"`:''}><b>${esc(x.t)}</b><span>${esc(x.n)}</span><em class="${c}">${pct(x.chg,1)}</em></div>`).join('')}</div>`;
   const cart = C ? card('Cartelera del día', 'acciones líquidas · en verde las que están en el radar',
     `<div class="g2c"><div><h5 class="up">Más suben</h5>${lista(C.suben,'up')}</div><div><h5 class="down">Más bajan</h5>${lista(C.bajan,'down')}</div></div>`) : '';
-  return `${foco}${topH}<div class="grid inicio">${reg}${kpis}</div><div class="grid g2" style="margin-top:18px">${nuevos}${cart}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
+  const SL = P.sel || {rs:80, mv:7, score:70};
+  const sel = act.filter(a=>!a.sin_av && a.rs>=SL.rs && a.mv>=SL.mv && a.score>=SL.score).sort((x,y)=>y.score-x.score);
+  const estSel = a => a.vcp && ['armada','recien'].includes(a.vcp.estado) ? badge(a.vcp.estado)
+    : (mejorAv(a,'d') ? badge(mejorAv(a,'d').estado) : '<span class="mut">–</span>');
+  const cSel = [
+    {h:'', f:r=>`<span class="rk">${r.i+1}</span>`},
+    {h:'Ticker', f:r=>tk(r.a)},
+    TEND,
+    {h:'3 meses', f:r=>spark(r.a.spark_d)},
+    {h:'Score', n:1, f:r=>`<span class="scp">${fmt(r.a.score,0)}</span>`},
+    {h:'RS', n:1, f:r=>fmt(r.a.rs,0)},
+    {h:'ADR', n:1, f:r=>adrC(r.a.adr)},
+    VOLX,
+    INSC,
+    {h:'TC', f:r=>tcBadge(r.a.tc)},
+    {h:'VCP / AVWAP', f:r=>estSel(r.a)},
+    {h:'Sector', f:r=>`<span class="mut">${esc(r.a.sector)}</span>`},
+  ];
+  const selH = `<div class="foco">${card('Seleccionadas', `${sel.length} · RS ${SL.rs}+, ${SL.mv}/8 o más y score ${SL.score}+`,
+    tabla(cSel, sel.map((a,i)=>({a,i})), 'Ninguna cumple los tres filtros hoy.'))}</div>`;
+  return `${foco}${selH}${topH}<div class="grid inicio">${reg}${kpis}</div><div class="grid g2" style="margin-top:18px">${nuevos}${cart}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
     <h2 class="sec">Top 3 del score</h2>${spot}
     <h2 class="sec">Earnings próximos <small>7 días · activos que cumplen los requisitos</small></h2>
     ${card('Calendario', ev.length+(ev.length===1?' reporte':' reportes'), earn)}`;
