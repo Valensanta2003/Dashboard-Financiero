@@ -30,6 +30,15 @@ FOCO_MAXIMO = 10
 FOCO_RS_MINIMO = 80
 FOCO_RIESGO_MAX = 8.0
 SCORE_CASTIGO_BANDERA = 5
+# **Pesos del score** (tienen que sumar 100)
+PUNTOS_TENDENCIA = 18
+PUNTOS_RS = 23
+PUNTOS_COMPRESION = 32
+PUNTOS_SETUP = 17
+PUNTOS_FUNDAMENTALES = 10
+# **Fundamentales CAN SLIM** (suman puntos, nunca excluyen)
+BUSCAR_FUNDAMENTALES = True
+CRECIMIENTO_FUERTE = 25  # % interanual: acelerando y sobre este valor suma todo; solo una de las dos, la mitad
 # **Bases VCP**
 VCP_MIN_CONTRACCIONES = 2
 VCP_ULTIMA_MAX = 10.0
@@ -314,6 +323,109 @@ def liquida(df):
     if not pruebas: return True, v50, d50
     ok = [v >= m for m, v in pruebas]
     return (any(ok) if LIQUIDEZ_ALCANZA_UNO else all(ok)), v50, d50
+
+# ---------------------------------------------------------------- fundamentales CAN SLIM
+ARCHIVO_FUNDAMENTALES = "fundamentales_cache.json"
+FUND_DIAS = 7  # se refrescan cada semana o apenas hay un reporte nuevo
+
+def _fecha(x):
+    x = pd.Timestamp(x)
+    return (x.tz_localize(None) if x.tzinfo else x).strftime("%Y-%m-%d")
+
+def _fund_yahoo(t):
+    """EPS trimestral (reportado y estimado), ventas trimestrales, EPS y ventas anuales, EPS 12 meses e institucionales."""
+    try:
+        tk = yf.Ticker(t)
+        ed = tk.get_earnings_dates(limit=28)
+        eps = []
+        if ed is not None and not ed.empty:
+            for f, r in ed.iterrows():
+                if pd.notna(r.get("Reported EPS")):
+                    eps.append([_fecha(f), float(r["Reported EPS"]), float(r["EPS Estimate"]) if pd.notna(r.get("EPS Estimate")) else None])
+        def fila(d, k):
+            if d is None or d.empty or k not in d.index: return []
+            return [[_fecha(c), float(v)] for c, v in d.loc[k].items() if pd.notna(v)]
+        q, a = tk.quarterly_income_stmt, tk.income_stmt
+        i = tk.info or {}
+        return {"dia": dt.date.today().isoformat(), "eps": sorted(eps), "ventas": sorted(fila(q, "Total Revenue")),
+                "eps_anual": sorted(fila(a, "Diluted EPS")), "ventas_anual": sorted(fila(a, "Total Revenue")),
+                "eps_ttm": i.get("trailingEps"), "inst": i.get("heldPercentInstitutions"), "moneda": i.get("financialCurrency")}
+    except Exception:
+        return None
+
+def _hace_un_anio(serie, k):
+    """Valor del mismo trimestre del año anterior (fecha entre 10 y 14 meses antes)."""
+    f = pd.Timestamp(serie[k][0])
+    for fila in serie[:k][::-1]:
+        dias = (f - pd.Timestamp(fila[0])).days
+        if 300 <= dias <= 430: return fila[1]
+    return None
+
+def _crec(act, ant):
+    return (act / ant - 1) * 100 if act is not None and ant is not None and ant > 0 else None
+
+def _yoy(serie):
+    """Crecimientos interanuales de cada trimestre, del más nuevo al más viejo."""
+    return [_crec(serie[k][1], _hace_un_anio(serie, k)) for k in range(len(serie) - 1, -1, -1)]
+
+def _pts_crec(g0, g1, maximo):
+    """Acelera (contra el trimestre o el año anterior) y crece fuerte: todo; solo una de las dos: la mitad."""
+    if g0 is None or g0 <= 0: return 0.0
+    acel = g1 is not None and g0 > g1
+    fuerte = g0 >= CRECIMIENTO_FUERTE
+    return maximo if (acel and fuerte) else maximo / 2 if (acel or fuerte) else 0.0
+
+def fundamentales(tickers, ultimo_reporte):
+    """{ticker: datos para la ficha y puntos CAN SLIM}, con caché en fundamentales_cache.json."""
+    from concurrent.futures import ThreadPoolExecutor
+    try: cache = json.load(open(ARCHIVO_FUNDAMENTALES))
+    except Exception: cache = {}
+    limite = (dt.date.today() - dt.timedelta(days=FUND_DIAS)).isoformat()
+    def vencido(t):
+        c = cache.get(t)
+        if not c or c.get("dia", "") < limite: return True
+        u = ultimo_reporte.get(t)
+        return bool(u is not None and u.strftime("%Y-%m-%d") > c["dia"])
+    pedir = [t for t in tickers if vencido(t)]
+    if pedir:
+        print(f"   Fundamentales de {len(pedir)} candidatas…")
+        for pasada, hilos in ((1, 4), (2, 2)):
+            if not pedir: break
+            if pasada == 2: time.sleep(10)
+            with ThreadPoolExecutor(max_workers=hilos) as ex:
+                res = list(ex.map(_fund_yahoo, pedir))
+            for t, r in zip(pedir, res):
+                if not r: continue
+                # Yahoo da solo 5 trimestres de ventas: se suman a los ya guardados para ir armando historia
+                ventas = {f: v for f, v in (cache.get(t) or {}).get("ventas", [])}
+                ventas.update({f: v for f, v in r["ventas"]})
+                r["ventas"] = sorted([f, v] for f, v in ventas.items())
+                cache[t] = r
+            pedir = [t for t, r in zip(pedir, res) if not r]
+        try: json.dump(cache, open(ARCHIVO_FUNDAMENTALES, "w"))
+        except Exception: pass
+    out = {}
+    for t in tickers:
+        c = cache.get(t)
+        if not c: continue
+        ge, gv = _yoy(c["eps"]), _yoy(c["ventas"])
+        va = c.get("ventas_anual") or []
+        anual_v = _crec(va[-1][1], va[-2][1]) if len(va) >= 2 else None
+        e0, e1 = (ge + [None, None])[:2]
+        v0, v1 = (gv + [None, None])[:2]
+        if v1 is None: v1 = anual_v  # sin el trimestre anterior, se compara contra el crecimiento del último año
+        mitad = PUNTOS_FUNDAMENTALES / 2
+        trim = []
+        for k in range(len(c["eps"]) - 1, max(-1, len(c["eps"]) - 5), -1):
+            f, rep_, est = c["eps"][k]
+            trim.append({"f": f, "eps": rep_, "ant": _hace_un_anio(c["eps"], k), "supero": est is not None and rep_ > est})
+        ea = c.get("eps_anual") or []
+        out[t] = {"eps_g": num(e0, 0) if e0 is not None else None, "eps_g_ant": num(e1, 0) if e1 is not None else None,
+                  "ventas_g": num(v0, 0) if v0 is not None else None, "ventas_g_ant": num(v1, 0) if v1 is not None else None,
+                  "pts_eps": _pts_crec(e0, e1, mitad), "pts_ventas": _pts_crec(v0, v1, mitad),
+                  "eps_ttm": c.get("eps_ttm"), "inst": num(c["inst"] * 100, 0) if c.get("inst") is not None else None,
+                  "trim": trim[::-1], "anual": [[f[:4], num(v, 2)] for f, v in ea[-4:]], "moneda": c.get("moneda")}
+    return out
 
 # ---------------------------------------------------------------- indicadores
 def sma(s, n): return s.rolling(n).mean()
@@ -827,10 +939,10 @@ def detectar_vcp(df):
     }
 
 # ---------------------------------------------------------------- score
-def partes_score(mv, rs, comp_d, sav_d, comp_d_rup, ins_d, piv, vcp=None):
-    tend = mv / 8 * 20
-    fuer = rs / 99 * 25
-    contr = (comp_d["score"] if comp_d else 0) / 100 * 35
+def partes_score(mv, rs, comp_d, sav_d, comp_d_rup, ins_d, piv, vcp=None, fund=None):
+    tend = mv / 8 * PUNTOS_TENDENCIA
+    fuer = rs / 99 * PUNTOS_RS
+    contr = (comp_d["score"] if comp_d else 0) / 100 * PUNTOS_COMPRESION
     setup = 0.0
     if sav_d:
         setup += 12 if sav_d["estado"] == "rompe" else 7
@@ -842,7 +954,9 @@ def partes_score(mv, rs, comp_d, sav_d, comp_d_rup, ins_d, piv, vcp=None):
         if e == "armada": setup += 6
         elif e == "recien": setup += 8 if (vcp["vol_rup"] or 0) >= VOL_RUPTURA else 4
         elif e == "confirmo": setup += 4
-    return {"tend": num(tend, 1), "rs": num(fuer, 1), "contr": num(contr, 1), "setup": num(min(setup, 20), 1)}
+    fu = (fund["pts_eps"] + fund["pts_ventas"]) if fund else 0.0
+    return {"tend": num(tend, 1), "rs": num(fuer, 1), "contr": num(contr, 1),
+            "setup": num(min(setup, 20) / 20 * PUNTOS_SETUP, 1), "fund": num(fu, 1)}
 
 def spark(s, n): return [num(x, 4) for x in s.iloc[-n:].values]
 
@@ -970,7 +1084,7 @@ def correr():
             "d10": num(estiramiento(df)[0], 1), "d20": num(estiramiento(df)[1], 1), "earn_momento": momento_earnings(prox),
             "ep": {k: v for k, v in ep.items() if not k.startswith("_")} if ep else None,
             "estadio": estadio(df), "flags": banderas(df, sav["d"], earn_dias),
-            "spark_d": spark(c, 63), "spark_w": spark(wk.Close, 30), "_r21p": float(r21_pct.get(t, 50)),
+            "spark_d": spark(c, 63), "spark_w": spark(wk.Close, 30), "_r21p": float(r21_pct.get(t, 50)), "_earn_u": earn,
         })
     for a in activos:
         etf = ETF_INDUSTRIA.get(a.get("industria") or "") or ETF_SECTOR.get(a["sector"])
@@ -991,9 +1105,16 @@ def correr():
         print("5/5 Intradía desactivado")
         activos = [a for a in activos if not a["sin_av"] or a["vcp"] or _comprimida(a)]
     print(f"   {sum(1 for a in activos if a['vcp'])} con base VCP")
+    acc = [a for a in activos if a["tipo"] == "accion"]
+    fund = fundamentales([a["t"] for a in acc], {a["t"]: a["_earn_u"] for a in acc}) if BUSCAR_FUNDAMENTALES else {}
+    print(f"   {len(fund)} con fundamentales")
     for a in activos:
+        a.pop("_earn_u", None)
+        a["fund"] = fund.get(a["t"])
+        if a["fund"] and a["fund"]["eps_ttm"] and a["fund"]["eps_ttm"] > 0:
+            a["fund"]["pe"] = num(a["precio"] / a["fund"]["eps_ttm"], 1)
         p = partes_score(a["mv"], a["rs"], a["comp"]["d"], a["setup_av"]["d"],
-                         a["comp"]["d"] and a["comp"]["d"]["ruptura"], a["inside"]["d"], a["pivot30"], a["vcp"])
+                         a["comp"]["d"] and a["comp"]["d"]["ruptura"], a["inside"]["d"], a["pivot30"], a["vcp"], a["fund"])
         a["partes"] = p
         malas = [f for f in a["flags"] if f["k"] in ("rechazo", "sinvol", "ext", "estirada")]
         a["castigo"] = num(len(malas) * SCORE_CASTIGO_BANDERA, 1)
@@ -1014,7 +1135,8 @@ def correr():
                    "vcp_min": VCP_MIN_CONTRACCIONES, "vcp_ult": VCP_ULTIMA_MAX, "vcp_form": VCP_FORMANDO_MAX, "vcp_dist": VCP_DIST_PIVOT,
                    "vcp_seco": VCP_VOL_SECO, "vcp_dias": VCP_DIAS_RUPTURA, "vcp_seg": VCP_DIAS_SEGUIMIENTO,
                    "vcp_smin": VCP_SEMANAS_MIN, "vcp_smax": VCP_SEMANAS_MAX, "emas_asc": EMAS_ASCENSO,
-                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "est10": ESTIRADA_EMA10_ADR, "est20": ESTIRADA_EMA20_ADR,
+                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE,
+                   "pts": {"tend": PUNTOS_TENDENCIA, "rs": PUNTOS_RS, "contr": PUNTOS_COMPRESION, "setup": PUNTOS_SETUP, "fund": PUNTOS_FUNDAMENTALES}, "est10": ESTIRADA_EMA10_ADR, "est20": ESTIRADA_EMA20_ADR,
                    "foco_rs": FOCO_RS_MINIMO, "foco_riesgo": FOCO_RIESGO_MAX, "foco_max": FOCO_MAXIMO}},
         "foco": foco, "activos": sorted(activos, key=lambda a: -a["score"])}
     html = PLANTILLA.replace("__DATA__", json.dumps(datos, ensure_ascii=False, allow_nan=False, default=str))
@@ -1126,6 +1248,18 @@ h2.sec small{color:var(--muted);font-weight:500;font-size:13px}
 .tv span{color:var(--muted)}.tv b{display:block;border-radius:4px;padding:2px 0;font-size:11px}
 .tv b.ok{color:#2fa65a;background:rgba(129,199,132,.18)}.tv b.no{color:#E57373;background:rgba(229,115,115,.18)}
 .tv .ar{width:100%;font-size:11px;line-height:18px}
+.fgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.fbox{border:1px solid var(--line2);border-radius:12px;padding:8px 10px;display:flex;flex-direction:column;gap:2px}
+.fbox span{color:var(--muted);font-size:12px}.fbox b{font-size:18px}.fbox small{color:var(--muted);font-size:11px}
+.fbox.up{border-color:var(--up)}.fbox.up b{color:var(--up)}.fbox.warn b{color:var(--warn)}.fbox.down b{color:var(--down)}
+.ebars{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px;text-align:center}
+.eq em{font-style:normal;font-weight:700;font-size:12px;display:block;min-height:16px}
+.eq em.up{color:var(--up)}.eq em.warn{color:var(--warn)}.eq em.down{color:var(--down)}.eq em.mut{color:var(--muted)}
+.eq .par{display:flex;align-items:flex-end;justify-content:center;gap:4px;height:74px;border-bottom:1px solid var(--line2)}
+.eq .par i{width:14px;border-radius:3px 3px 0 0}.eq .vie{background:var(--line2)}
+.eq .nue.up{background:var(--up)}.eq .nue.warn{background:var(--warn)}.eq .nue.down,.eq .nue.mut{background:var(--down)}
+.eq span{font-size:11px;color:var(--muted);display:block;margin-top:4px}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--up);margin-right:4px;vertical-align:middle}
 .embudo{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
 .embudo .paso{display:flex;flex-direction:column;min-width:0}
 .embudo .paso b{font-size:20px;font-variant-numeric:tabular-nums}
@@ -1354,6 +1488,7 @@ const EMAS_N = ['E10','E20','E50','E150','E200'];
 const tend = a => `<span class="tend">${xo8(a)}<span class="ars">${(a.pend||[]).map((v,i)=>flecha(v,EMAS_N[i])).join('')}<i></i>${flecha(a.m1d,'Momentum diario')}${flecha(a.m1w,'Momentum semanal')}</span></span>`;
 const adrC = v => v==null ? '<span class="mut">s/d</span>' : `<span class="adr${v<1.5?0:v<2.5?1:v<4.5?2:v<6?3:4}">${fmt(v,2)}%</span>`;
 const volx = a => a.vol_pct==null ? '–' : `<span class="${a.vol_pct>0?'up':'mut'}">${pct(a.vol_pct,0)}</span>`;
+const PILARES = [['Tendencia','tend',P.pts.tend,'var(--blue)'],['Fuerza RS','rs',P.pts.rs,'var(--acc)'],['Contracción','contr',P.pts.contr,'var(--violet)'],['Setup','setup',P.pts.setup,'var(--warn)'],['Fundamentales','fund',P.pts.fund,'#e879a6']];
 const TEND = {h:'Tendencia', f:r=>tend(r.a)};
 const VOLX = {h:'Vol. vs prom. 50', n:1, f:r=>volx(r.a)};
 const barra = v => `<span class="sc"><span class="barra"><i style="width:${Math.max(0,Math.min(100,v))}%"></i></span><span>${fmt(v,0)}</span></span>`;
@@ -1424,10 +1559,10 @@ function vInicio(){
   const foco = `<div class="foco">${card('Lista de foco', fl.length ? fl.length+' para hoy' : null,
     `<p class="nota" style="margin:0 0 10px">Hasta ${P.foco_max} activos con un setup listo (VCP armada o recién rota, compresión con EMAs en ascenso cerca del gatillo o rota, ruptura de AVWAP con volumen), RS ${P.foco_rs}+, riesgo de ${fmt(P.foco_riesgo,0)}% o menos y sin banderas (estirada de la EMA10/20, extendido, sin volumen, rechazo, earnings en 7 días). Ordenados por score.${R && R.score<40 ? ' <b>Régimen defensivo: tamaño chico o esperar.</b>' : ''}</p>`
     + tabla(cFo, fl.map(r=>({...r, a:idx[r.t]})), 'Ningún setup cumple todo hoy. Mejor esperar que forzar.'))}</div>`;
-  const PT = [['Tendencia','tend',20,'var(--blue)'],['Fuerza RS','rs',25,'var(--acc)'],['Contracción','contr',35,'var(--violet)'],['Setup','setup',20,'var(--warn)']];
+  const PT = PILARES;
   const spot = top.length ? `<div class="grid g3">${top.map(a=>`<div class="card spot" data-t="${esc(a.t)}" tabindex="0">
       <div class="cab">${ring(a.score)}<div><h4>${esc(a.t)}</h4><p>${esc(a.sector)}${a.estadio?' · estadio '+a.estadio:''}</p><p>${flags(a,3)}</p></div></div>
-      <div class="partes">${PT.map(([n,k,m,c])=>`<span class="mut">${n}</span><span class="pbar"><i style="width:${a.partes[k]/m*100}%;background:${c}"></i></span><span>${fmt(a.partes[k],0)}</span>`).join('')}</div></div>`).join('')}</div>`
+      <div class="partes">${PT.map(([n,k,m,c])=>`<span class="mut">${n}</span><span class="pbar"><i style="width:${(a.partes[k]||0)/m*100}%;background:${c}"></i></span><span>${fmt(a.partes[k]||0,0)}</span>`).join('')}</div></div>`).join('')}</div>`
     : '<p class="vacio">Sin activos con estos filtros.</p>';
   const ev = act.filter(a=>a.earn_dias!=null && a.earn_dias>=0 && a.earn_dias<=7).sort((x,y)=>x.earn_dias-y.earn_dias);
   const earn = ev.length ? `<div class="earn">${ev.map(a=>`<div class="eitem" data-t="${esc(a.t)}" tabindex="0"><b>${esc(a.t)}</b>
@@ -1667,9 +1802,37 @@ function vSetups(){
 /* ---------- Ficha ---------- */
 const MV = ['Precio sobre EMA150 y EMA200','EMA150 sobre EMA200','EMA200 subiendo (22 velas)','EMA50 sobre EMA150 y EMA200','Precio sobre EMA50',
   `${P.sobre_min}% o más sobre el mínimo de 252 velas`, `Dentro del ${P.bajo_max}% del máximo de 252 velas`, 'Línea de RS vs SPY sobre su media de 50'];
+const MES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+const mesAnio = f => MES[+f.slice(5,7)-1] + ' ' + f.slice(2,4);
+const crecC = v => v==null ? 'mut' : v>=P.fuerte ? 'up' : v>0 ? 'warn' : 'down';
+function bloqueFund(a){
+  const F = a.fund;
+  if(a.tipo!=='accion') return '';
+  if(!F) return `<h4>Análisis fundamental</h4><p class="vacio">s/d</p>`;
+  const caja = (t, v, sub, c) => `<div class="fbox ${c||''}"><span>${t}</span><b>${v}</b>${sub?`<small>${sub}</small>`:''}</div>`;
+  const ant = v => v!=null ? 'antes '+pct(v,0) : '';
+  const tr = F.trim || [];
+  const mx = Math.max(...tr.flatMap(x=>[Math.abs(x.eps), Math.abs(x.ant||0)]), 0.0001);
+  const g = x => x.ant>0 ? (x.eps/x.ant-1)*100 : null;
+  const barras = tr.length ? `<div class="ebars">${tr.map(x=>{ const v=g(x); return `<div class="eq">
+      <em class="${crecC(v)}">${v!=null?pct(v,0):'s/d'}</em>
+      <div class="par"><i class="vie" style="height:${Math.max(2,Math.abs(x.ant||0)/mx*70)}px"></i><i class="nue ${crecC(v)}" style="height:${Math.max(2,Math.abs(x.eps)/mx*70)}px"></i></div>
+      <span>${x.supero?'<b class="dot"></b>':''}${mesAnio(x.f)}</span></div>`; }).join('')}</div>
+    <p class="nota" style="margin:6px 0 0">Barra gris: mismo trimestre del año anterior. <b class="dot"></b> superó lo estimado por los analistas.</p>` : '';
+  const an = F.anual || [];
+  let cagr = null;
+  if(an.length>=2 && an[0][1]>0 && an[an.length-1][1]>0) cagr = (Math.pow(an[an.length-1][1]/an[0][1], 1/(an.length-1))-1)*100;
+  const anual = an.length ? `<div class="kv" style="margin-top:10px"><span>EPS anual${F.moneda&&F.moneda!=='USD'?' ('+esc(F.moneda)+')':''}</span><span>${an.map(([y,v])=>`${y}: ${fmt(v,2)}`).join(' · ')}</span>
+      <span>Crecimiento compuesto</span><span class="${crecC(cagr)}">${cagr!=null?pct(cagr,0)+' por año':'s/d'} <span class="mut">· CAN SLIM pide ${P.fuerte}%</span></span></div>` : '';
+  return `<h4>Análisis fundamental · ${fmt((F.pts_eps||0)+(F.pts_ventas||0),1)}/${P.pts.fund} pts</h4>
+    <div class="fgrid">${caja('Crecim. EPS (trim.)', F.eps_g!=null?pct(F.eps_g,0):'s/d', ant(F.eps_g_ant), crecC(F.eps_g))}
+      ${caja('Crecim. ventas (trim.)', F.ventas_g!=null?pct(F.ventas_g,0):'s/d', ant(F.ventas_g_ant), crecC(F.ventas_g))}
+      ${caja('P/E', F.pe!=null?fmt(F.pe,1)+'x':'s/d')}${caja('% institucional', F.inst!=null?fmt(F.inst,0)+'%':'s/d')}</div>
+    ${barras}${anual}`;
+}
 function ficha(t){
   const a = D.activos.find(x=>x.t===t); if(!a) return;
-  const PT = [['Tendencia','tend',20,'var(--blue)'],['Fuerza RS','rs',25,'var(--acc)'],['Contracción','contr',35,'var(--violet)'],['Setup','setup',20,'var(--warn)']];
+  const PT = PILARES;
   const tvSym = a.tipo==='cripto' ? a.t.replace('-','') : a.t.replace('-','.');
   const avt = tf => (a.avwap[tf]||[]).length ? `<div class="tw"><table><thead><tr><th>Ancla</th><th class="n">AVWAP</th><th class="n">Dist.</th><th class="n">Vol.</th><th>Estado</th></tr></thead><tbody>${
       a.avwap[tf].map(x=>`<tr><td>${esc(x.ancla)}${x.fuerte?'<span class="fuerte">★</span>':''} <span class="mut">${esc(x.fecha)}</span></td><td class="n">${pr(x.valor)}</td><td class="n ${cls(x.dist)}">${pct(x.dist)}</td><td class="n">${x.vol_x!=null?fmt(x.vol_x,1)+'x':'–'}</td><td>${badge(x.estado)}${(x.estado==='rompe'||x.estado==='por romper')&&!x.cuenta?' <span class="mut" title="No cuenta: rompió sin volumen o ancla débil">no cuenta</span>':''}</td></tr>`).join('')}</tbody></table></div>` : '<p class="vacio">Sin anclas.</p>';
@@ -1683,7 +1846,7 @@ function ficha(t){
     ${(a.flags||[]).length ? `<h4>Avisos</h4><div class="flist">${a.flags.map(f=>`<div class="${f.tipo}">${esc(f.t)}</div>`).join('')}</div>` : ''}
     <h4>Score</h4>
     <div style="display:flex;gap:18px;align-items:center">${ring(a.score, 84)}
-      <div class="partes" style="flex:1">${PT.map(([n,k,m,c])=>`<span class="mut">${n}</span><span class="pbar"><i style="width:${a.partes[k]/m*100}%;background:${c}"></i></span><span>${fmt(a.partes[k],1)}/${m}</span>`).join('')}</div></div>
+      <div class="partes" style="flex:1">${PT.map(([n,k,m,c])=>`<span class="mut">${n}</span><span class="pbar"><i style="width:${(a.partes[k]||0)/m*100}%;background:${c}"></i></span><span>${fmt(a.partes[k]||0,1)}/${m}</span>`).join('')}</div></div>
     ${a.castigo>0 ? `<p class="nota" style="margin-top:8px">Descuento de ${fmt(a.castigo,0)} puntos por banderas (estirada, extendido, sin volumen o rechazo).</p>` : ''}
     <h4>Tendencia · ${xo8(a)}</h4>
     <div class="tv">${EMAS_N.map((n,i)=>`<div><span>${n}</span>${flecha((a.pend||[])[i],n)}</div>`).join('')}<div><span>M1D</span>${flecha(a.m1d,'Momentum diario')}</div><div><span>M1W</span>${flecha(a.m1w,'Momentum semanal')}</div><div><span>ADR%</span><b>${adrC(a.adr)}</b></div></div>
@@ -1699,6 +1862,7 @@ function ficha(t){
     </div>
     <h4>Criterios de Minervini · ${a.mv}/8</h4>
     <ul class="checks">${MV.map((l,i)=>`<li><b class="${a.mv_checks[i]?'up':'down'}">${a.mv_checks[i]?'✓':'✗'}</b>${l}</li>`).join('')}</ul>
+    ${bloqueFund(a)}
     <h4>Rango de 52 semanas · ${fmt(a.pos52,0)}%</h4>
     <div class="rango"><i style="left:${Math.max(0,Math.min(100,a.pos52))}%"></i></div>
     <div class="rl"><span>${pr(a.lo52)}</span><span>${pr(a.hi52)}</span></div>
