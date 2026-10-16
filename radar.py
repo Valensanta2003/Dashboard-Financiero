@@ -1,4 +1,8 @@
 # ⚙️ CONFIGURACIÓN — cambiá los valores y guardá (commit). La próxima corrida los usa.
+# **Identidad**
+NOMBRE_DASHBOARD = "Valensanta Momentum"
+LEMA = "1% better every day"
+AVATAR_URL = "https://pbs.twimg.com/profile_images/1918682628393148416/lIVS4K5f_400x400.jpg"  # foto de @Valensantaa__; si falla se ve el logo
 # **Requisitos**
 PRECIO_MINIMO = 10
 ADR_MINIMO = 2.0
@@ -60,6 +64,11 @@ TC_RANGO_MAX = 1.5      # % entre el cierre más alto y el más bajo de esas sem
 TC_VOL_SECO = 1.0       # volumen promedio de esas semanas contra el de las 10 previas: por debajo = seco
 TC_CERCA_PIVOT = 5.0    # % máximo debajo del pivot (o del máximo de 10 semanas) para sumar el extra
 TC_PUNTOS = 3           # puntos de setup (sobre 20) por tener TC; +2 si además está seco y cerca del pivot
+# **Gatillos semanales** (filtros de la vista Gatillos)
+CRUCE_SEMANAS = 4  # un cruce de RSI o MACD semanal cuenta si pasó en las últimas N semanas
+# **Retorno del Top del score** (track record entre corridas)
+TOP_N = 10        # cuántas del ranking se siguen
+TOP_RUEDAS = 10   # ventana en ruedas para medir el retorno desde que entraron
 # **Episodic pivots y banderas**
 EP_MIN_SUBA = 4.0
 EP_MIN_VOL = 2.0
@@ -124,6 +133,17 @@ ETF_INDUSTRIA = {"Semiconductors": "SMH", "Semiconductor Equipment & Materials":
 ETF_SECTOR = {"Tecnología": "XLK", "Financiero": "XLF", "Energía": "XLE", "Salud": "XLV", "Industria": "XLI",
               "Consumo discrecional": "XLY", "Consumo básico": "XLP", "Servicios públicos": "XLU", "Materiales": "XLB",
               "Inmobiliario": "XLRE", "Comunicaciones": "XLC"}
+ETF_PALABRAS = (("Semiconductor", "SMH"), ("Software", "IGV"), ("Biotechnology", "XBI"), ("Regional", "KRE"),
+                ("Savings Institutions", "KRE"), ("Homebuilding", "ITB"), ("Residential Construction", "ITB"),
+                ("Precious Metals", "GDX"), ("Gold", "GDX"), ("Solar", "TAN"), ("Uranium", "URA"))
+
+def etf_de(industria, sector):
+    ind = industria or ""
+    if ind in ETF_INDUSTRIA: return ETF_INDUSTRIA[ind]
+    for palabra, etf in ETF_PALABRAS:
+        if palabra in ind: return etf
+    return ETF_SECTOR.get(sector)
+
 RESPALDO = ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX","CRM","ORCL","ADBE","NOW","PLTR",
             "ANET","TSM","MU","AMAT","LRCX","KLAC","SHOP","UBER","COIN","HOOD","JPM","GS","MS","V","MA","LLY","ABBV",
             "UNH","ISRG","XOM","CVX","CAT","GE","DE","BA","COST","WMT","HD","NKE","DIS","TWLO","NBIS","CLS","GRMN","BIIB"]
@@ -285,14 +305,44 @@ def _perfil_yahoo(t):
     return {"dia": dt.date.today().isoformat(), "mcap": i.get("marketCap"), "px": px,
             "sector": i.get("sector"), "ind": i.get("industry"), "nom": i.get("shortName") or i.get("longName")}
 
+SECTORES_NASDAQ = {"Finance": "Financiero", "Health Care": "Salud", "Technology": "Tecnología", "Consumer Discretionary": "Consumo discrecional",
+                   "Industrials": "Industria", "Real Estate": "Inmobiliario", "Energy": "Energía", "Utilities": "Servicios públicos",
+                   "Basic Materials": "Materiales", "Consumer Staples": "Consumo básico", "Telecommunications": "Comunicaciones",
+                   "Miscellaneous": "Otros"}
+
+def nasdaq_screener():
+    """Market cap, sector e industria de todas las acciones de EE.UU. en una sola consulta al screener de NASDAQ.
+    Desde GitHub Actions Yahoo no devuelve estos datos, así que esta es la fuente principal."""
+    import requests
+    try:
+        r = requests.get("https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true",
+                         headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=60)
+        filas = r.json()["data"]["rows"]
+    except Exception as e:
+        print(f"   ⚠️ No pude leer el screener de NASDAQ ({e}); uso Yahoo")
+        return {}
+    out = {}
+    for f in filas:
+        try: mcap = float(f.get("marketCap") or 0) or None
+        except ValueError: mcap = None
+        t = str(f.get("symbol", "")).strip().replace("/", "-").replace(".", "-")
+        sec = (f.get("sector") or "").strip()
+        out[t] = {"mcap": mcap, "sector": SECTORES_NASDAQ.get(sec, sec) or None, "industria": (f.get("industry") or "").strip() or None}
+    print(f"   Screener de NASDAQ: {len(out)} acciones")
+    return out
+
 def perfiles(tickers, precios):
-    """{ticker: {mcap, sector, industria, nombre}} desde yfinance con caché en sectores_cache.json.
-    Solo consulta los que faltan o están vencidos; el market cap se reescala con el precio de hoy."""
+    """{ticker: {mcap, sector, industria, nombre}}. Market cap del screener de NASDAQ (o Yahoo si falta); sector e industria
+    de Yahoo cuando hay caché válido (clasificación más fina), si no de NASDAQ. Yahoo solo se consulta para las que NASDAQ no cubre."""
     from concurrent.futures import ThreadPoolExecutor
+    nq = nasdaq_screener()
     try: cache = json.load(open(ARCHIVO_PERFILES))
     except Exception: cache = {}
+    # Un perfil sin market cap ni sector no sirve (Yahoo a veces responde vacío): se vuelve a pedir
+    cache = {t: c for t, c in cache.items() if c.get("mcap") or c.get("sector")}
     limite = (dt.date.today() - dt.timedelta(days=PERFIL_DIAS)).isoformat()
-    pedir = [t for t in tickers if t not in cache or cache[t].get("dia", "") < limite][:PERFIL_MAX_CORRIDA]
+    falta_nq = lambda t: not (nq.get(t) or {}).get("mcap") or not (nq.get(t) or {}).get("sector")
+    pedir = [t for t in tickers if falta_nq(t) and (t not in cache or cache[t].get("dia", "") < limite)][:PERFIL_MAX_CORRIDA]
     if pedir:
         print(f"   Perfil de {len(pedir)} acciones (market cap, sector e industria)…")
         hechos = 0
@@ -305,20 +355,23 @@ def perfiles(tickers, precios):
             _perfil_yahoo(pedir[0])
             with ThreadPoolExecutor(max_workers=hilos) as ex:
                 res = list(ex.map(_perfil_yahoo, pedir))
+            ok = lambda p: p and (p.get("mcap") or p.get("sector"))
             for t, p in zip(pedir, res):
-                if p: cache[t] = p; hechos += 1
-            pedir = [t for t, p in zip(pedir, res) if not p]
+                if ok(p): cache[t] = p; hechos += 1
+            pedir = [t for t, p in zip(pedir, res) if not ok(p)]
         print(f"   {hechos} perfiles nuevos ({len(pedir)} sin respuesta, se reintentan la próxima corrida)")
         try: json.dump(cache, open(ARCHIVO_PERFILES, "w"))
         except Exception: pass
     out = {}
     for t in tickers:
-        c = cache.get(t)
-        if not c: continue
-        mcap = c.get("mcap")
-        if mcap and c.get("px") and precios.get(t): mcap = mcap * precios[t] / c["px"]
+        c, n = cache.get(t) or {}, nq.get(t) or {}
+        mcap = n.get("mcap")
+        if not mcap and c.get("mcap"):
+            mcap = c["mcap"] * precios[t] / c["px"] if c.get("px") and precios.get(t) else c["mcap"]
         sec = c.get("sector")
-        out[t] = {"mcap": mcap, "sector": SECTORES_ES.get(sec, sec) if sec else None, "industria": c.get("ind"), "nombre": c.get("nom")}
+        sec = SECTORES_ES.get(sec, sec) if sec else n.get("sector")
+        if not (mcap or sec): continue
+        out[t] = {"mcap": mcap, "sector": sec, "industria": c.get("ind") or n.get("industria"), "nombre": c.get("nom")}
     return out
 
 def liquida(df):
@@ -426,10 +479,12 @@ def fundamentales(tickers, ultimo_reporte):
             f, rep_, est = c["eps"][k]
             trim.append({"f": f, "eps": rep_, "ant": _hace_un_anio(c["eps"], k), "supero": est is not None and rep_ > est})
         ea = c.get("eps_anual") or []
+        ult4 = [x[1] for x in c["eps"][-4:]]
+        eps12 = sum(ult4) if len(ult4) == 4 else c.get("eps_ttm")
         out[t] = {"eps_g": num(e0, 0) if e0 is not None else None, "eps_g_ant": num(e1, 0) if e1 is not None else None,
                   "ventas_g": num(v0, 0) if v0 is not None else None, "ventas_g_ant": num(v1, 0) if v1 is not None else None,
                   "pts_eps": _pts_crec(e0, e1, mitad), "pts_ventas": _pts_crec(v0, v1, mitad),
-                  "eps_ttm": c.get("eps_ttm"), "inst": num(c["inst"] * 100, 0) if c.get("inst") is not None else None,
+                  "eps_ttm": eps12, "inst": num(c["inst"] * 100, 0) if c.get("inst") is not None else None,
                   "trim": trim[::-1], "anual": [[f[:4], num(v, 2)] for f, v in ea[-4:]], "moneda": c.get("moneda")}
     return out
 
@@ -505,6 +560,32 @@ def minervini(df, spy):
 def pasa_minervini(checks, rs):
     return sum(checks) >= MIN_CRITERIOS_MINERVINI and (rs >= RS_MINIMO or not EXIGIR_RS)
 
+def rsi(c, n=14):
+    d = c.diff()
+    up, dn = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean(), (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
+    return 100 - 100 / (1 + up / dn.replace(0, np.nan))
+
+def _ultimo_cruce(a, b):
+    """Semanas desde el último cruce de a sobre b (positivo = cruzó hacia arriba, negativo = hacia abajo)."""
+    dif = (a - b).dropna()
+    if len(dif) < 3: return None, None
+    signo = np.sign(dif.values)
+    for k in range(len(signo) - 1, 0, -1):
+        if signo[k] != signo[k - 1] and signo[k] != 0:
+            return len(signo) - 1 - k, "arriba" if signo[k] > 0 else "abajo"
+    return None, None
+
+def semanales(wk):
+    """RSI semanal contra su SMA14 y cruces del MACD semanal (12, 26, 9)."""
+    if len(wk) < 40: return None
+    c = wk.Close
+    r = rsi(c); rm = r.rolling(14).mean()
+    macd = ema(c, 12) - ema(c, 26); senal = ema(macd, 9)
+    hr, dr = _ultimo_cruce(r, rm)
+    hm, dm = _ultimo_cruce(macd, senal)
+    return {"rsi": num(r.iloc[-1], 0), "rsi_sma": num(rm.iloc[-1], 0), "rsi_hace": hr, "rsi_dir": dr,
+            "macd_hace": hm, "macd_dir": dm, "macd_cero": "bajo cero" if macd.iloc[-1] < 0 else "sobre cero"}
+
 def tecnico(df, wk, e):
     """Pendientes de EMAs, momentum 35-5 diario y semanal, y volumen estilo MarketSmith."""
     c, v = df.Close, df.Volume
@@ -517,6 +598,7 @@ def tecnico(df, wk, e):
         "m1d": pendiente(mom(c), 5), "m1w": pendiente(mom(wk.Close), 4) if len(wk) > 40 else None,
         "vol_hoy": num(v.iloc[-1], 0), "vol_pct": num((v.iloc[-1] / v50 - 1) * 100, 0) if v50 > 0 else None,
         "ud50": num(up / dn, 2) if dn > 0 else None,
+        "d200": num((c.iloc[-1] / e[200].iloc[-1] - 1) * 100, 1), "sem": semanales(wk),
     }
 
 # ---------------------------------------------------------------- episodic pivots, banderas, estadio
@@ -966,6 +1048,38 @@ def cierres_apretados(df, wk, vcp=None):
             "dist": num(dist, 1) if dist is not None else None, "seco": bool(seco), "cerca": bool(cerca),
             "desde": w.index[-n].strftime("%d-%m-%y")}
 
+# ---------------------------------------------------------------- retorno del top del score
+ARCHIVO_HISTORIAL = "historial_top.json"
+
+def top_retorno(activos, fecha, spy):
+    """Guarda el top del día y mide el retorno de las TOP_N actuales desde que entraron (dentro de TOP_RUEDAS) contra el SPY."""
+    try: hist = json.load(open(ARCHIVO_HISTORIAL))
+    except Exception: hist = {}
+    rank = sorted(activos, key=lambda a: -a["score"])
+    hist[fecha] = {a["t"]: [a["score"], a["precio"]] for a in rank[:max(30, TOP_N)]}
+    fechas = sorted(hist)[-60:]
+    hist = {f: hist[f] for f in fechas}
+    try: json.dump(hist, open(ARCHIVO_HISTORIAL, "w"))
+    except Exception: pass
+    ventana = fechas[-TOP_RUEDAS:]
+    tops = {f: [t for t, _ in sorted(hist[f].items(), key=lambda x: -x[1][0])[:TOP_N]] for f in ventana}
+    filas = []
+    for a in rank[:TOP_N]:
+        entro = fecha
+        for f in reversed(ventana):
+            if a["t"] in tops[f]: entro = f
+            else: break
+        base = hist[entro][a["t"]][1]
+        filas.append({"t": a["t"], "score": a["score"], "entro": entro, "ret": num((a["precio"] / base - 1) * 100, 2) if base else None,
+                      "spark": a["spark_d"][-max(TOP_RUEDAS, 10):]})
+    r_spy = None
+    if spy is not None and len(ventana):
+        ini = spy[spy.index <= pd.Timestamp(ventana[0])]
+        if len(ini): r_spy = num((spy.iloc[-1] / ini.iloc[-1] - 1) * 100, 2)
+    rets = [f["ret"] for f in filas if f["ret"] is not None]
+    return {"ruedas": len(ventana), "desde": ventana[0] if ventana else fecha, "spy": r_spy,
+            "medio": num(sum(rets) / len(rets), 2) if rets else None, "filas": filas}
+
 # ---------------------------------------------------------------- score
 def partes_score(mv, rs, comp_d, sav_d, comp_d_rup, ins_d, piv, vcp=None, fund=None, tc=None):
     tend = mv / 8 * PUNTOS_TENDENCIA
@@ -1117,7 +1231,7 @@ def correr():
             "spark_d": spark(c, 63), "spark_w": spark(wk.Close, 30), "_r21p": float(r21_pct.get(t, 50)), "_earn_u": earn,
         })
     for a in activos:
-        etf = ETF_INDUSTRIA.get(a.get("industria") or "") or ETF_SECTOR.get(a["sector"])
+        etf = etf_de(a.get("industria"), a["sector"])
         d = diario.get(etf) if etf else None
         a["etf"] = {"t": etf, "rs": num(rs_pct.get(etf), 0) if etf in rs_pct.index else None,
                     "chg": num((d.Close.iloc[-1] / d.Close.iloc[-2] - 1) * 100) if d is not None and len(d) > 1 else None} if etf else None
@@ -1151,11 +1265,14 @@ def correr():
         a["score"] = num(max(0, sum(v for v in p.values() if v) - a["castigo"]), 1)
         a["calor"] = num(0.6 * a["score"] + 0.4 * a.pop("_r21p"), 1)
     foco = lista_foco(activos)
+    fecha_iso = max(df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto").strftime("%Y-%m-%d")
+    top = top_retorno(activos, fecha_iso, spy_c)
+    print(f"   Top {TOP_N}: {top['medio']}% promedio en {top['ruedas']} ruedas vs SPY {top['spy']}%")
     print(f"   Lista de foco: {len(foco)}")
     fechas = [df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto"] or [hoy]
     datos = {"meta": {
         "fecha_datos": max(fechas).strftime("%d-%m-%Y"), "generado": ahora_ar().strftime("%d-%m-%Y %H:%M"),
-        "n_universo": len(diario), "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
+        "n_universo": len(diario), "top": top, "nombre": NOMBRE_DASHBOARD, "lema": LEMA, "avatar": AVATAR_URL, "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
         "params": {"min_mv": MIN_CRITERIOS_MINERVINI, "sobre_min": PCT_SOBRE_MINIMO_52S, "bajo_max": PCT_DEBAJO_MAXIMO_52S,
                    "rs_min": RS_MINIMO, "precio_min": PRECIO_MINIMO, "exigir_av": EXIGIR_AVWAP,
                    "dist_d": DIST_POR_ROMPER_DIARIO, "dist_w": DIST_POR_ROMPER_SEMANAL,
@@ -1165,11 +1282,11 @@ def correr():
                    "vcp_min": VCP_MIN_CONTRACCIONES, "vcp_ult": VCP_ULTIMA_MAX, "vcp_form": VCP_FORMANDO_MAX, "vcp_dist": VCP_DIST_PIVOT,
                    "vcp_seco": VCP_VOL_SECO, "vcp_dias": VCP_DIAS_RUPTURA, "vcp_seg": VCP_DIAS_SEGUIMIENTO,
                    "vcp_smin": VCP_SEMANAS_MIN, "vcp_smax": VCP_SEMANAS_MAX, "emas_asc": EMAS_ASCENSO,
-                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT,
+                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "top_ruedas": TOP_RUEDAS,
                    "pts": {"tend": PUNTOS_TENDENCIA, "rs": PUNTOS_RS, "contr": PUNTOS_COMPRESION, "setup": PUNTOS_SETUP, "fund": PUNTOS_FUNDAMENTALES}, "est10": ESTIRADA_EMA10_ADR, "est20": ESTIRADA_EMA20_ADR,
                    "foco_rs": FOCO_RS_MINIMO, "foco_riesgo": FOCO_RIESGO_MAX, "foco_max": FOCO_MAXIMO}},
         "foco": foco, "activos": sorted(activos, key=lambda a: -a["score"])}
-    html = PLANTILLA.replace("__DATA__", json.dumps(datos, ensure_ascii=False, allow_nan=False, default=str))
+    html = PLANTILLA.replace("__NOMBRE__", NOMBRE_DASHBOARD).replace("__DATA__", json.dumps(datos, ensure_ascii=False, allow_nan=False, default=str))
     print(f"Listo en {time.time() - t0:.0f} s")
     return html, datos
 
@@ -1180,18 +1297,19 @@ PLANTILLA = r'''<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
-<title>Radar de rupturas</title>
+<title>__NOMBRE__</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root{
-  --bg:#0b0c0e; --rail:#0f1013; --card:#141619; --card2:#1c1f24; --line:#23262c; --line2:#30343b;
-  --text:#eceef1; --muted:#8a9099; --faint:#5f656e;
-  --acc:#3ddc97; --acc2:#1f9f69; --accsoft:rgba(61,220,151,.13); --oninv:#ffffff;
+  --bg:#050607; --rail:#08090b; --card:#0c0e11; --card2:#0c0e11; --line:#1a1e23; --line2:#262b31;
+  --text:#e8eaed; --muted:#858c96; --faint:#59606a;
+  --acc:#3ddc97; --acc2:#1f9f69; --accsoft:rgba(61,220,151,.12); --oninv:#ffffff;
   --up:#3ddc97; --down:#f0626e; --warn:#f4b740; --blue:#6ea8fe; --violet:#a78bfa;
   --sombra:0 10px 30px rgba(0,0,0,.35);
   --ui:"Plus Jakarta Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   color-scheme:dark; box-sizing:border-box;
   padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
 }
@@ -1210,8 +1328,8 @@ PLANTILLA = r'''<!doctype html>
   --up:#12a366; --down:#d6384b; --warn:#b37b08; --blue:#2e6bd0; --violet:#6c4fd0; --sombra:0 8px 24px rgba(20,30,40,.08); color-scheme:light;
 }
 :root[data-theme="dark"]{
-  --bg:#0b0c0e; --rail:#0f1013; --card:#141619; --card2:#1c1f24; --line:#23262c; --line2:#30343b;
-  --text:#eceef1; --muted:#8a9099; --faint:#5f656e;
+  --bg:#050607; --rail:#08090b; --card:#0c0e11; --card2:#0c0e11; --line:#1a1e23; --line2:#262b31;
+  --text:#e8eaed; --muted:#858c96; --faint:#59606a;
   --acc:#3ddc97; --acc2:#1f9f69; --accsoft:rgba(61,220,151,.13);
   --up:#3ddc97; --down:#f0626e; --warn:#f4b740; --blue:#6ea8fe; --violet:#a78bfa; --sombra:0 10px 30px rgba(0,0,0,.35); color-scheme:dark;
 }
@@ -1226,6 +1344,7 @@ button{font:inherit;color:inherit}
 nav.rail{position:sticky;top:0;height:100vh;background:var(--rail);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;gap:4px;padding:18px 0}
 .logo{width:46px;height:46px;border-radius:14px;background:linear-gradient(140deg,var(--acc),var(--acc2));display:grid;place-items:center;margin-bottom:16px;box-shadow:0 6px 18px rgba(61,220,151,.25)}
 .logo svg{width:24px;height:24px;stroke:#fff}
+.logo img{width:100%;height:100%;border-radius:inherit;object-fit:cover}
 .rail button{width:78px;padding:10px 0 8px;border-radius:14px;background:none;border:0;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:5px;font-size:11.5px;font-weight:600;cursor:pointer}
 .rail button svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .rail button:hover{color:var(--text)}
@@ -1254,9 +1373,14 @@ input[type=search]{background:var(--card);border:1px solid var(--line);border-ra
 .sin_av{font-size:11px;font-weight:700;color:var(--muted);border:1px solid var(--line2);border-radius:6px;padding:1px 5px;margin-left:6px;white-space:nowrap}
 
 /* Tarjetas */
-.card{background:linear-gradient(155deg,var(--card2) 0%,var(--card) 60%);border:1px solid var(--line);border-radius:20px;padding:18px 20px;box-shadow:var(--sombra);min-width:0}
-.card h3{margin:0 0 12px;font-size:16px;font-weight:700;display:flex;justify-content:space-between;align-items:baseline;gap:10px}
-.card h3 small{color:var(--muted);font-weight:500;font-size:13px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px;min-width:0}
+.card h3,h2.sec,.ficha h4{font-family:var(--mono);text-transform:uppercase;letter-spacing:.14em;font-weight:500}
+.card h3{margin:0 0 14px;font-size:12.5px;color:var(--acc);display:flex;justify-content:space-between;align-items:baseline;gap:10px;position:relative;padding-left:12px}
+.card h3::before,h2.sec::before,.ficha h4::before{content:"";position:absolute;left:0;top:1px;bottom:1px;width:3px;border-radius:2px;background:var(--acc)}
+.card h3 small{color:var(--muted);font-family:var(--ui);text-transform:none;letter-spacing:0;font-size:12.5px}
+.kpi b,.embudo .paso b,.gauge .v b,.ring b,.precio,.fh h2,.x8,.rkg{font-family:var(--mono)}
+.rkg{display:inline-block;margin-left:10px;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:700;color:var(--blue);border:1px solid color-mix(in srgb,var(--blue) 45%,transparent);vertical-align:6px}
+.gate{display:flex;justify-content:space-between;gap:10px;font-size:14px;padding:4px 0}
 .grid{display:grid;gap:18px}
 .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
 .g3{grid-template-columns:repeat(3,minmax(0,1fr))}
@@ -1264,8 +1388,11 @@ input[type=search]{background:var(--card);border:1px solid var(--line);border-ra
 .inicio{grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
 @media (max-width:1100px){.inicio,.g2{grid-template-columns:1fr}.gauto{grid-template-columns:1fr}}
 @media (max-width:760px){.g3{grid-template-columns:1fr}}
-h2.sec{font-size:18px;margin:28px 0 12px;font-weight:700;display:flex;align-items:baseline;gap:10px}
-h2.sec small{color:var(--muted);font-weight:500;font-size:13px}
+h2.sec{font-size:13px;margin:30px 0 12px;color:var(--acc);display:flex;align-items:baseline;gap:10px;position:relative;padding-left:12px}
+h2.sec small{color:var(--muted);font-family:var(--ui);text-transform:none;letter-spacing:0;font-size:12.5px}
+.subnav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.subnav .chip{font-size:14px}
+.chips2{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px;padding-top:10px;border-top:1px dashed var(--line2)}
 .nota{color:var(--muted);font-size:13.5px;margin:-4px 0 14px;max-width:85ch}
 .tend{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 .x8{font-weight:800;font-variant-numeric:tabular-nums}.x8.warn{color:#EF6C00}
@@ -1293,6 +1420,14 @@ h2.sec small{color:var(--muted);font-weight:500;font-size:13px}
 .tc{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700;color:var(--warn);background:rgba(244,183,64,.14);white-space:nowrap}
 .ins{display:inline-block;padding:1px 6px;border-radius:6px;font-size:11.5px;font-weight:700;color:var(--blue);background:rgba(110,168,254,.14);white-space:nowrap}
 .tc.ok{color:var(--up);background:var(--accsoft)}
+.tbigs{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:12px;margin-bottom:12px}
+.tbig{padding:14px 16px;text-align:center}.tbig+.tbig{border-left:1px solid var(--line)}
+.tbig span{display:block;font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--warn)}
+.tbig+.tbig span{color:var(--blue)}
+.tbig b{display:block;font-family:var(--mono);font-size:34px;line-height:1.2;text-shadow:0 0 18px currentColor}
+.scp{display:inline-block;min-width:38px;text-align:center;padding:2px 8px;border-radius:999px;border:1px solid color-mix(in srgb,var(--acc) 45%,transparent);color:var(--acc);font-family:var(--mono)}
+.rbar{display:inline-block;width:110px;height:8px;border-radius:4px;background:var(--line);overflow:hidden}
+.rbar i{display:block;height:100%;border-radius:4px;background:var(--acc)}.rbar i.neg{background:var(--down)}
 .embudo{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
 .embudo .paso{display:flex;flex-direction:column;min-width:0}
 .embudo .paso b{font-size:20px;font-variant-numeric:tabular-nums}
@@ -1401,7 +1536,7 @@ aside.ficha.open{transform:none}
 .fh p{margin:5px 0 0;color:var(--muted);font-size:14px}
 .cerrar{background:var(--card2);border:1px solid var(--line);border-radius:10px;width:36px;height:36px;cursor:pointer;font-size:17px;line-height:1}
 .precio{font-size:22px;font-weight:700;margin-top:12px}
-.ficha h4{margin:22px 0 10px;font-size:15px}
+.ficha h4{margin:24px 0 10px;font-size:12px;color:var(--acc);position:relative;padding-left:12px}
 .checks{list-style:none;margin:0;padding:0;font-size:14px}
 .checks li{padding:3px 0;display:flex;gap:8px}
 .checks li b{width:16px;text-align:center}
@@ -1466,7 +1601,7 @@ footer{color:var(--faint);font-size:12.5px;margin-top:40px;max-width:95ch}
 
 <script>
 const D = __DATA__;
-const S = {vcpF:'', pag:'inicio', tf:'d', tipo:'todo', q:'', insideMin:1, soloComp:true, sector:null, emaF:0, epHoy:false};
+const S = {gat:'setups', rsiF:false, macdF:false, vcpF:'', pag:'inicio', tf:'d', tipo:'todo', q:'', insideMin:1, soloComp:true, sector:null, emaF:0, epHoy:false};
 const P = D.meta.params;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -1493,16 +1628,19 @@ const IC = {
   setups:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2"/>',
   req:'<path d="M20 6L9 17l-5-5"/>'
 };
+IC.gatillos = '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>';
 const ico = k => `<svg viewBox="0 0 24 24" aria-hidden="true">${IC[k]}</svg>`;
 const PAGS = [
   ['inicio','Inicio','Panorama del mercado y lo más destacado del día.'],
   ['sectores','Sectores','Las 5 más calientes de cada sector. El calor combina el score (60%) con el retorno del último mes relativo al universo (40%).'],
-  ['avwap','AVWAP','AVWAP ancladas a earnings, episodic pivots, días de alto volumen, máximo estructural, máximo histórico e IPO reciente.'],
   ['vcp','VCP','Bases con contracciones de volatilidad cada vez más chicas y volumen que se seca (Minervini). El pivot es el máximo de la última contracción.'],
+  ['gatillos','Gatillos','Todo lo que puede disparar una entrada: setups, compresión, inside y episodic pivots, con filtros de RSI y MACD semanal.'],
+];
+const GAT = [
+  ['setups','Setups','Tus setups: ruptura de AVWAP, ruptura de compresión y 30 Min Pivot sobre EMA diaria.'],
   ['comp','Compresión','Activos apretados en precio (ATR y ancho de Bollinger) y en volumen.'],
   ['inside','Inside','Velas con máximo y mínimo dentro de la vela anterior. El gatillo alcista es el máximo de la vela madre.'],
   ['ep','Episodic','Días con suba fuerte y volumen explosivo: posible entrada institucional y nuevo ancla de AVWAP.'],
-  ['setups','Setups','Tus setups: ruptura de AVWAP, ruptura de compresión y 30 Min Pivot sobre EMA diaria.'],
 ];
 
 function spark(arr, w=84, h=24){
@@ -1534,9 +1672,24 @@ function ring(v, size=70, col='var(--acc)'){
     <circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="${col}" stroke-width="6" stroke-linecap="round"
       stroke-dasharray="${(c*v/100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${size/2} ${size/2})"/></svg><b>${fmt(v,0)}</b></div>`;
 }
+const rsiOk = a => a.sem && a.sem.rsi_dir==='arriba' && a.sem.rsi_hace!=null && a.sem.rsi_hace < P.cruce_sem;
+const macdOk = a => a.sem && a.sem.macd_dir==='arriba' && a.sem.macd_hace!=null && a.sem.macd_hace < P.cruce_sem;
+const pasaSem = a => S.pag!=='gatillos' || ((!S.rsiF || rsiOk(a)) && (!S.macdF || macdOk(a)));
+const hace = n => n===0 ? 'esta semana' : n===1 ? 'hace 1 semana' : `hace ${n} semanas`;
+function vGatillos(){
+  const g = GAT.find(x=>x[0]===S.gat);
+  const base = D.activos.filter(a => S.tipo==='todo' || a.tipo===S.tipo);
+  const sub = `<div class="subnav">${GAT.map(([k,n])=>`<button class="chip" data-gat="${k}" aria-pressed="${S.gat===k}">${n}</button>`).join('')}</div>
+    <div class="chips2"><span class="mut" style="align-self:center;font-size:13px">Filtros semanales:</span>
+      <button class="chip" data-semf="rsiF" aria-pressed="${S.rsiF}">RSI cruzó su SMA14 al alza <span class="mut">${base.filter(rsiOk).length}</span></button>
+      <button class="chip" data-semf="macdF" aria-pressed="${S.macdF}">MACD cruce alcista <span class="mut">${base.filter(macdOk).length}</span></button>
+      <span class="mut" style="align-self:center;font-size:12.5px">en las últimas ${P.cruce_sem} semanas</span></div>
+    <p class="nota">${esc(g[2])}</p>`;
+  return sub + VISTAS[S.gat]();
+}
 function visibles(conSolo30=false){
   const q = S.q.trim().toLowerCase();
-  return D.activos.filter(a => (conSolo30 || !a.sin_av) && (S.tipo==='todo' || a.tipo===S.tipo) &&
+  return D.activos.filter(a => (conSolo30 || !a.sin_av) && (S.tipo==='todo' || a.tipo===S.tipo) && pasaSem(a) &&
     (!q || a.t.toLowerCase().includes(q) || (a.nombre||'').toLowerCase().includes(q)));
 }
 function mejorAv(a, tf){
@@ -1561,12 +1714,13 @@ function gauge(v){
     <path d="M10 100 A90 90 0 0 1 190 100" fill="none" stroke="${col}" stroke-width="14" stroke-linecap="round" stroke-dasharray="${(L*v/100).toFixed(1)} ${L.toFixed(1)}"/></svg>`;
 }
 const m0 = E => E.length ? E[0][1] : 0;
+const fechaCorta = f => { const x = /(\d{4})-(\d{2})-(\d{2})/.exec(f||''); return x ? `${+x[3]}-${MES[+x[2]-1]}` : (f||''); };
 function vInicio(){
   const act = visibles(), tf = S.tf, R = D.meta.regimen;
   let rom=0; act.forEach(a => { const m = mejorAv(a, tf); if(m && m.estado==='rompe') rom++; });
   const k = [
     ['req', act.length, 'cumplen los requisitos', 'sectores'],
-    ['avwap', rom, `rompiendo AVWAP (${TFN[tf]})`, 'avwap'],
+    ['avwap', rom, `rompiendo AVWAP (${TFN[tf]})`, 'setups'],
     ['comp', visibles(true).filter(a=>a.comp[tf]&&a.comp[tf].es&&a.comp[tf].emas).length, `comprimidos con EMAs en ascenso (${TFN[tf]})`, 'comp'],
     ['inside', act.filter(a=>a.inside[tf]&&a.inside[tf].n>=1).length, `con inside ${tf==='d'?'day':'week'}`, 'inside'],
     ['ep', act.filter(a=>a.ep).length, 'episodic pivots (10 ruedas)', 'ep'],
@@ -1608,7 +1762,26 @@ function vInicio(){
   const emb = E.length ? card('Embudo de filtros', `${fmt(m0(E),0)} activos analizados`,
     `<div class="embudo">${E.map(([k,n],i)=>`<div class="paso"><b>${fmt(n,0)}</b><span>${esc(k)}</span></div>${i<E.length-1?'<i>→</i>':''}`).join('')}</div>`
     + (D.meta.n_extra ? `<p class="nota" style="margin:10px 0 0">Además, ${D.meta.n_extra} sin AVWAP activa aparecen solo en VCP, Compresión o 30 Min Pivot.</p>` : '')) : '';
-  return `${foco}<div class="grid inicio">${reg}${kpis}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
+  const T = D.meta.top;
+  const topH = T && T.filas.length ? (() => {
+    const mx = Math.max(...T.filas.map(f=>Math.abs(f.ret||0)), 0.01);
+    const big = (t, v, c) => `<div class="tbig"><span>${t}</span><b class="${cls(v)}">${pct(v)}</b></div>`;
+    const cols = [
+      {h:'', f:r=>`<span class="rk">${r.i+1}</span>`},
+      {h:'Ticker', f:r=>tk(r.a, false)},
+      {h:'Evolución', f:r=>spark(r.f.spark)},
+      {h:'Score', n:1, f:r=>`<span class="scp">${fmt(r.f.score,0)}</span>`},
+      {h:'Entró', n:1, f:r=>`<span class="mut">${esc(fechaCorta(r.f.entro))}</span>`},
+      {h:'', f:r=>`<span class="rbar"><i class="${r.f.ret<0?'neg':''}" style="width:${Math.abs(r.f.ret||0)/mx*100}%"></i></span>`},
+      {h:'Retorno', n:1, f:r=>`<b class="${cls(r.f.ret)}">${pct(r.f.ret)}</b>`},
+    ];
+    const idx = Object.fromEntries(D.activos.map(a=>[a.t,a]));
+    return `<div class="foco">${card(`Retorno Top ${T.filas.length} del score`, `últimas ${T.ruedas} ${T.ruedas===1?'rueda':'ruedas'} desde ${esc(fechaCorta(T.desde))}`,
+      `<div class="tbigs">${big(`Retorno medio Top ${T.filas.length}`, T.medio)}${big('SPY', T.spy)}</div>`
+      + tabla(cols, T.filas.filter(f=>idx[f.t]).map((f,i)=>({f, i, a:idx[f.t]})), '')
+      + (T.ruedas < P.top_ruedas ? `<p class="nota" style="margin:10px 0 0">El historial arrancó hace ${T.ruedas} ${T.ruedas===1?'rueda':'ruedas'}: hasta juntar ${P.top_ruedas}, la ventana es más corta.</p>` : ''))}</div>`;
+  })() : '';
+  return `${foco}${topH}<div class="grid inicio">${reg}${kpis}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
     <h2 class="sec">Top 3 del score</h2>${spot}
     <h2 class="sec">Earnings próximos <small>7 días · activos que cumplen los requisitos</small></h2>
     ${card('Calendario', ev.length+(ev.length===1?' reporte':' reportes'), earn)}`;
@@ -1883,7 +2056,7 @@ function ficha(t){
   const cmp = tf => a.comp[tf] ? `<span>Compresión ${TFN[tf]}</span><span>${fmt(a.comp[tf].score,0)}${a.comp[tf].es?' · comprimida':''}</span>` : '';
   const ins = tf => `<span>Inside ${tf==='d'?'day':'week'}</span><span>${a.inside[tf] && a.inside[tf].n ? a.inside[tf].n : 'no'}</span>`;
   $('#ficha').innerHTML = `
-    <div class="fh"><div><h2>${esc(a.t)}</h2><p>${esc(a.nombre)} · ${esc(a.sector)}${a.industria?' · '+esc(a.industria):''}</p></div><button class="cerrar" id="cerrar" aria-label="Cerrar ficha">✕</button></div>
+    <div class="fh"><div><h2>${esc(a.t)}<span class="rkg">#${D.activos.indexOf(a)+1} de ${D.activos.length}</span></h2><p>${esc(a.nombre)} · ${esc(a.sector)}${a.industria?' · '+esc(a.industria):''}</p></div><button class="cerrar" id="cerrar" aria-label="Cerrar ficha">✕</button></div>
     <div class="precio">${pr(a.precio)} <span class="${cls(a.chg)}">${pct(a.chg)}</span></div>
     <div style="margin-top:12px">${spark(a.spark_d, 420, 72)}</div>
     ${a.sin_av ? `<p class="nota" style="margin-top:12px">No está rompiendo ni por romper ninguna AVWAP: cumple Minervini, precio y ADR, y aparece solo en VCP, Compresión y 30 Min Pivot.</p>` : ''}
@@ -1892,6 +2065,10 @@ function ficha(t){
     <div style="display:flex;gap:18px;align-items:center">${ring(a.score, 84)}
       <div class="partes" style="flex:1">${PT.map(([n,k,m,c])=>`<span class="mut">${n}</span><span class="pbar"><i style="width:${(a.partes[k]||0)/m*100}%;background:${c}"></i></span><span>${fmt(a.partes[k]||0,1)}/${m}</span>`).join('')}</div></div>
     ${a.castigo>0 ? `<p class="nota" style="margin-top:8px">Descuento de ${fmt(a.castigo,0)} puntos por banderas (estirada, extendido, sin volumen o rechazo).</p>` : ''}
+    <h4>Gates Stage 2</h4>
+    <div class="gate"><span><b class="${a.mv_checks[0]&&(a.pend||[])[4]>0?'up':'down'}">${a.mv_checks[0]&&(a.pend||[])[4]>0?'✓':'✗'}</b> Precio sobre la EMA200 con pendiente positiva</span><span class="${cls(a.d200)}">${pct(a.d200,1)}</span></div>
+    ${a.sem ? `<div class="kv" style="margin-top:6px"><span>RSI semanal / su SMA14</span><span>${fmt(a.sem.rsi,0)} / ${fmt(a.sem.rsi_sma,0)}${a.sem.rsi_hace!=null?' · cruzó '+(a.sem.rsi_dir==='arriba'?'al alza ':'a la baja ')+hace(a.sem.rsi_hace):''}</span>
+      <span>MACD semanal</span><span>${a.sem.macd_hace!=null?'cruce '+(a.sem.macd_dir==='arriba'?'alcista':'bajista')+' '+hace(a.sem.macd_hace)+' · ':''}${a.sem.macd_cero}</span></div>` : ''}
     <h4>Tendencia · ${xo8(a)}</h4>
     <div class="tv">${EMAS_N.map((n,i)=>`<div><span>${n}</span>${flecha((a.pend||[])[i],n)}</div>`).join('')}<div><span>M1D</span>${flecha(a.m1d,'Momentum diario')}</div><div><span>M1W</span>${flecha(a.m1w,'Momentum semanal')}</div><div><span>ADR%</span><b>${adrC(a.adr)}</b></div></div>
     <div class="tv">${a.mv_checks.map((ok,i)=>`<div><span>${i+1}</span><b class="${ok?'ok':'no'}" title="${esc(MV[i])}">${ok?'✓':'✗'}</b></div>`).join('')}</div>
@@ -1937,18 +2114,20 @@ function ficha(t){
 function cerrarFicha(){ $('#ficha').classList.remove('open'); $('#velo').classList.remove('open'); $('#ficha').setAttribute('aria-hidden','true'); }
 
 /* ---------- Navegación y eventos ---------- */
-const CORTO = {comp:'Compr.', sectores:'Sectores', episodic:'EP'};
-const VISTAS = {inicio:vInicio, sectores:vSectores, avwap:vAvwap, vcp:vVcp, comp:vComp, inside:vInside, ep:vEp, setups:vSetups};
-$('#rail').innerHTML = `<div class="logo">${'<svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>'}</div>` +
+const CORTO = {sectores:'Sectores'};
+const VISTAS = {inicio:vInicio, sectores:vSectores, avwap:vAvwap, vcp:vVcp, gatillos:vGatillos, comp:vComp, inside:vInside, ep:vEp, setups:vSetups};
+const LOGO_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>';
+$('#rail').innerHTML = `<div class="logo">${D.meta.avatar ? `<img src="${esc(D.meta.avatar)}" alt="" referrerpolicy="no-referrer" onerror="this.parentNode.innerHTML=LOGO_SVG">` : LOGO_SVG}</div>` +
   PAGS.map(([k,n])=>`<button data-pag="${k}" aria-current="${S.pag===k?'page':'false'}">${ico(k)}<span class="lg">${n}</span><span class="ct">${CORTO[k]||n}</span></button>`).join('');
 function ir(p){
+  if(GAT.some(x=>x[0]===p)){ S.gat = p; p = 'gatillos'; }
   S.pag = p; document.querySelectorAll('#rail button').forEach(b=>b.setAttribute('aria-current', b.dataset.pag===p ? 'page' : 'false'));
   render(); window.scrollTo(0,0);
 }
 function render(){
   const pg = PAGS.find(x=>x[0]===S.pag);
-  $('#titulo').textContent = {inicio:'Radar de rupturas', ep:'Episodic pivots', setups:'Mis setups', inside:'Inside days'}[pg[0]] || pg[1];
-  $('#sub').textContent = pg[2];
+  $('#titulo').textContent = {inicio: D.meta.nombre || 'Radar'}[pg[0]] || pg[1];
+  $('#sub').textContent = pg[0]==='inicio' && D.meta.lema ? D.meta.lema + ' · ' + pg[2] : pg[2];
   $('#vista').innerHTML = VISTAS[S.pag]();
 }
 function seg(id, key){
@@ -1961,6 +2140,8 @@ $('#rail').addEventListener('click', e => { const b = e.target.closest('[data-pa
 $('#q').addEventListener('input', e => { S.q = e.target.value; render(); });
 $('#vista').addEventListener('click', e => {
   const k = e.target.closest('[data-ir]'); if(k){ ir(k.dataset.ir); return; }
+  const gt = e.target.closest('[data-gat]'); if(gt){ S.gat = gt.dataset.gat; render(); return; }
+  const sf = e.target.closest('[data-semf]'); if(sf){ S[sf.dataset.semf] = !S[sf.dataset.semf]; render(); return; }
   const sec = e.target.closest('.sec-t'); if(sec){ S.sector = S.sector===sec.dataset.sec ? null : sec.dataset.sec; render(); return; }
   if(e.target.closest('#solo')){ S.soloComp = !S.soloComp; render(); return; }
   const vf = e.target.closest('[data-vcp]'); if(vf){ S.vcpF = vf.dataset.vcp; render(); return; }

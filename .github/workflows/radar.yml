@@ -48,6 +48,12 @@ jobs:
           path: fundamentales_cache.json
           key: fundamentales-${{ github.run_id }}
           restore-keys: fundamentales-
+      - name: Recuperar historial del Top del score
+        uses: actions/cache@v4
+        with:
+          path: historial_top.json
+          key: historial-${{ github.run_id }}
+          restore-keys: historial-
       - name: Correr el radar
         run: python radar.py
       - uses: actions/upload-pages-artifact@v3
