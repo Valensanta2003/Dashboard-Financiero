@@ -6,6 +6,7 @@ AVATAR_URL = "https://pbs.twimg.com/profile_images/1918682628393148416/lIVS4K5f_
 # **Requisitos**
 PRECIO_MINIMO = 10
 ADR_MINIMO = 2.0
+ADR_MINIMO_ETF = 1.0  # los ETFs se mueven menos que una acción (EWZ ronda 2%, SPY 1%)
 ADR_PERIODO = 20
 MIN_CRITERIOS_MINERVINI = 6
 EXIGIR_RS = False  # True: además del X/8, exige RS Rating de RS_MINIMO o más
@@ -1216,7 +1217,7 @@ def correr():
     reg = regimen({t: diario.get(t, extra.get(t)) for t in ("SPY", "QQQ")}, extra.get("^VIX"),
                   [diario[t] for t in paso if es_acc(t)])
     liquidas = [t for t in paso if es_acc(t)]
-    paso = [t for t in paso if adr_pct(diario[t]) >= ADR_MINIMO]
+    paso = [t for t in paso if adr_pct(diario[t]) >= (ADR_MINIMO_ETF if info.at[t, "tipo"] == "etf" else ADR_MINIMO)]
     embudo.append((f"ADR ≥ {ADR_MINIMO:g}%", len(paso)))
     spy = diario.get("SPY")
     if spy is None: spy = extra.get("SPY")
