@@ -39,6 +39,8 @@ SEL_HISTORIA_RUEDAS = 20  # track record: ingresos a Seleccionadas de las últim
 # **Alertas por Telegram** (el token y el chat van como secretos de GitHub, nunca acá)
 ALERTAS_TELEGRAM = True
 URL_DASHBOARD = "https://valensanta2003.github.io/Dashboard-Financiero/"
+RESUMEN_DIARIO = True   # un resumen por Telegram con la primera corrida desde las 18 h (Argentina), ya con la vela cerrada
+RESUMEN_CERCA = 2.0     # % máximo hasta el pivot o la AVWAP para figurar como "armada para mañana"
 # **Lista de foco y score**
 FOCO_MAXIMO = 10
 FOCO_RS_MINIMO = 80
@@ -1156,12 +1158,69 @@ def track_seleccionadas(activos, fecha, diario, spy):
     rets = [x["ret"] for x in filas]; spys = [x["spy"] for x in filas if x["spy"] is not None]
     viejas = [x["ret"] for x in filas if x["entro"] < fecha]  # las que entraron hoy todavía no tienen resultado
     gan = sum(1 for x in viejas if x > 0)
-    return {"ruedas": len(ventana), "desde": ventana[0] if ventana else fecha, "n": len(filas),
+    previo_hoy = set(hist[fechas[-2]]) if len(fechas) >= 2 else None
+    nuevas = sorted(hoy - previo_hoy) if previo_hoy is not None else []
+    return {"nuevas": nuevas, "ruedas": len(ventana), "desde": ventana[0] if ventana else fecha, "n": len(filas),
             "medio": num(sum(rets) / len(rets), 2) if rets else None, "spy": num(sum(spys) / len(spys), 2) if spys else None,
             "aciertos": num(gan / len(viejas) * 100, 0) if viejas else None,
             "filas": sorted(filas, key=lambda x: x["entro"], reverse=True)[:40]}
 
-def alertas_telegram(activos, fecha):
+def armar_resumen(activos, fecha, reg, selh, rot, diario):
+    """Panorama del mercado y plan para la rueda siguiente, en HTML de Telegram."""
+    f2 = lambda x, d=1: f"{x:,.{d}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    sg = lambda x: ("+" if x > 0 else "") + f2(x, 2) + "%"
+    L = [f"📊 <b>{NOMBRE_DASHBOARD} · resumen del {pd.Timestamp(fecha).strftime('%d-%m')}</b>", ""]
+    if reg:
+        L.append(f"<b>Mercado: {reg['etiqueta']} ({reg['score']:.0f}/100)</b> · exposición sugerida {reg.get('expo', '')}")
+        idx = []
+        for t in ("SPY", "QQQ", "IWM"):
+            d = diario.get(t)
+            if d is not None and len(d) > 1: idx.append(f"{t} {sg((d.Close.iloc[-1] / d.Close.iloc[-2] - 1) * 100)}")
+        if idx: L.append(" · ".join(idx))
+        for c in reg["capas"]:
+            for x in c["det"]: L.append(f"• {x}")
+        h = reg.get("hist200") or []
+        if len(h) > 10:
+            a, b = h[-1][1], h[-11][1]
+            L.append(f"• Amplitud {'mejorando' if a > b + 2 else 'empeorando' if a < b - 2 else 'estable'}: {f2(a, 0)}% sobre la EMA200 (hace 10 ruedas {f2(b, 0)}%)")
+        # Sentimiento en una línea: miedo por VIX, presión vendedora por días de distribución y tendencia de la amplitud
+        import re
+        txt = " ".join(x for c in reg["capas"] for x in c["det"])
+        vix = re.search(r"VIX en ([\d.]+): ([^.]+)", txt)
+        dd = [int(x) for x in re.findall(r"(\d+) días de distribución", txt)]
+        partes = []
+        if vix: partes.append({"zona sana": "calma", "complacencia": "complacencia (cuidado con el exceso de confianza)",
+                               "tensión": "tensión", "pánico": "pánico"}.get(vix.group(2).strip(), vix.group(2)) + f" (VIX {f2(float(vix.group(1)))})")
+        if dd: partes.append("presión vendedora en los índices" if max(dd) >= 6 else "distribución moderada" if max(dd) >= 4 else "sin distribución relevante")
+        if len(h) > 10: partes.append("la amplitud acompaña" if h[-1][1] >= h[-11][1] else "la amplitud se deteriora")
+        if partes: L.append("<b>Sentimiento:</b> " + ", ".join(partes) + ".")
+        L.append(f"<i>{reg['rec']}</i>")
+    if rot and rot.get("etfs"):
+        lid, mej, deb = [], [], []
+        for e in rot["etfs"]:
+            x, y = e["rs"][-1], e["rs"][-1] - e["rs"][-2]
+            (lid if x >= 50 and y >= 0 else mej if x < 50 and y >= 0 else deb if x >= 50 else []).append(e["t"])
+        L += ["", f"<b>Rotación:</b> liderando {', '.join(lid[:8]) or 'ninguno'} · mejorando {', '.join(mej[:6]) or 'ninguno'} · se debilitan {', '.join(deb[:6]) or 'ninguno'}"]
+    sel = sorted([a for a in activos if es_seleccionada(a)], key=lambda a: -a["score"])
+    L += ["", f"<b>Seleccionadas: {len(sel)}</b>" + (f" · nuevas hoy: {', '.join(selh.get('nuevas', [])[:12])}" if selh and selh.get("nuevas") else "")]
+    if sel: L.append("Top 5: " + ", ".join(f"{a['t']} ({a['score']:.0f})" for a in sel[:5]))
+    armadas = []
+    for a in sel:
+        v, s_ = a.get("vcp"), (a.get("setup_av") or {}).get("d")
+        if v and v.get("pivot") and (v["estado"] == "armada" or (v.get("dist") is not None and -RESUMEN_CERCA <= v["dist"] <= 0)):
+            armadas.append(f"• <b>{a['t']}</b> VCP {v['estado']} · pivot {f2(v['pivot'], 2)} · stop {f2(v['stop'], 2)} · a {f2(abs(v['dist']), 1)}%")
+        elif s_ and s_["estado"] == "por romper" and s_.get("entrada"):
+            dist = (s_["entrada"] / a["precio"] - 1) * 100
+            if dist <= RESUMEN_CERCA:
+                armadas.append(f"• <b>{a['t']}</b> AVWAP {s_['ancla'].lower()} · entrada {f2(s_['entrada'], 2)} · stop {f2(s_['stop'], 2)} · a {f2(dist, 1)}%")
+    L += ["", f"<b>Armadas para mañana ({len(armadas)}):</b>"] + (armadas[:12] or ["Ninguna a menos de " + f2(RESUMEN_CERCA, 0) + "% del gatillo."])
+    ev = sorted([a for a in sel if a.get("earn_dias") is not None and 0 <= a["earn_dias"] <= 3], key=lambda a: a["earn_dias"])
+    if ev:
+        cuando = lambda d: "hoy" if d == 0 else "mañana" if d == 1 else f"en {d} días"
+        L += ["", "<b>Earnings (3 días):</b> " + ", ".join(f"{a['t']} {cuando(a['earn_dias'])}" for a in ev)]
+    return "\n".join(L)[:3900]
+
+def alertas_telegram(activos, fecha, resumen=None):
     """Manda por Telegram las Seleccionadas que hoy rompen su pivot VCP o su AVWAP con volumen (una vez por día y ticker)."""
     import os, requests
     token = os.environ.get("TELEGRAM_TOKEN", "").strip()
@@ -1189,6 +1248,8 @@ def alertas_telegram(activos, fecha):
             # Primer uso: un mensaje de prueba para confirmar que el bot llega
             msgs.append(f"✅ <b>{NOMBRE_DASHBOARD}</b> conectado. Te aviso acá cuando una Seleccionada rompa su pivot VCP o una AVWAP con volumen.")
         env["_conectado"] = "9999-12-31"
+        if resumen and f"_resumen:{fecha}" not in env:
+            msgs.append(resumen); env[f"_resumen:{fecha}"] = fecha
         for a in activos:
             if not es_seleccionada(a): continue
             v, s_ = a.get("vcp"), (a.get("setup_av") or {}).get("d")
@@ -1455,7 +1516,11 @@ def correr():
     for a in activos:
         a["rs16"] = [num(x.get(a["t"]), 0) if a["t"] in x.index else None for x in por_semana]
     selh = track_seleccionadas(activos, fecha_iso, diario, spy_c)
-    n_al = alertas_telegram(activos, fecha_iso)
+    resumen = None
+    if RESUMEN_DIARIO and ahora_ar().hour >= 18:
+        try: resumen = armar_resumen(activos, fecha_iso, reg, selh, rot, diario)
+        except Exception as e: print(f"   ⚠️ Resumen: {e}")
+    n_al = alertas_telegram(activos, fecha_iso, resumen)
     print(f"   Seleccionadas: {sum(es_seleccionada(a) for a in activos)} · alertas enviadas: {n_al}")
     print(f"   Top {TOP_N}: {top['medio']}% promedio en {top['ruedas']} ruedas vs SPY {top['spy']}%")
     print(f"   Lista de foco: {len(foco)}")
