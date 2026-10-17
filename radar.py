@@ -1183,7 +1183,7 @@ def alertas_telegram(activos, fecha):
         try: env = json.load(open(ARCHIVO_ALERTAS))
         except Exception: env = {}
         conectado = env.get("_conectado")
-        env = {k: v for k, v in env.items() if v >= (dt.date.today() - dt.timedelta(days=10)).isoformat()}
+        env = {k: v for k, v in env.items() if v >= (dt.date.today() - dt.timedelta(days=7)).isoformat()}
         msgs = []
         if not conectado:
             # Primer uso: un mensaje de prueba para confirmar que el bot llega
@@ -1197,7 +1197,8 @@ def alertas_telegram(activos, fecha):
                 motivo = f"rompió el pivot VCP {v['pivot']:.2f} con {v['vol_rup']:.1f}x de volumen"
             elif s_ and s_["estado"] == "rompe":
                 motivo = f"rompió la AVWAP {s_['ancla'].lower()} (entrada {s_['entrada']:.2f}, stop {s_['stop']:.2f})"
-            clave = f"{fecha}:{a['t']}"
+            # Una ruptura sigue "activa" varias velas: el mismo ticker y tipo no se repite por 7 días
+            clave = f"{a['t']}:{'vcp' if motivo and motivo.startswith('rompió el pivot') else 'avwap'}"
             if motivo and clave not in env:
                 msgs.append(f"🚀 <b>{a['t']}</b> {motivo}\nScore {a['score']:.0f} · RS {a['rs']:.0f} · {a['mv']}/8 · ${a['precio']:.2f}")
                 env[clave] = fecha
