@@ -81,6 +81,10 @@ CRUCE_SEMANAS = 4  # un cruce de RSI o MACD semanal cuenta si pasó en las últi
 # **Retorno del Top del score** (track record entre corridas)
 TOP_N = 10        # cuántas del ranking se siguen
 TOP_RUEDAS = 10   # ventana en ruedas para medir el retorno desde que entraron
+# **Régimen de mercado**
+FTD_SUBA_MIN = 1.25       # % mínimo de suba del índice para contar como follow-through day
+FTD_CORRECCION_MIN = 5.0  # % de caída desde el máximo de 60 ruedas para considerar que hubo corrección
+MOSTRAR_FEAR_GREED = True # Fear & Greed de CNN como dato aparte (no suma al score)
 # **Módulos de Inicio y Sectores**
 RSI_SOBRECOMPRA = 70     # RSI 14 diario: desde acá cuenta como sobrecomprada
 RSI_SOBREVENTA = 30      # y hasta acá como sobrevendida
@@ -721,9 +725,21 @@ def regimen(indices, vix, acciones):
                               f"{nh} nuevos máximos de 52 semanas contra {nl} nuevos mínimos"]})
     if vix is not None and len(vix):
         v = float(vix.Close.iloc[-1])
-        s = 20 if 13 <= v <= 20 else 14 if v < 13 else 12 if v <= 25 else 6 if v <= 30 else 4
-        lect = "zona sana" if 13 <= v <= 20 else "complacencia" if v < 13 else "tensión" if v <= 30 else "pánico"
-        capas.append({"nombre": "Sentimiento (VIX)", "pts": s, "max": 20, "det": [f"VIX en {v:.1f}: {lect}"]})
+        # Escala gradual por nivel y castigo si el VIX salta sobre su media de 50 ruedas (miedo en aumento)
+        if v < 12: s = 14
+        elif v <= 15: s = 20
+        elif v <= 20: s = 20 - (v - 15) * 1.2
+        elif v <= 25: s = 14 - (v - 20) * 1.2
+        elif v <= 30: s = 8 - (v - 25) * 0.8
+        else: s = 2
+        m50 = float(vix.Close.iloc[-50:].mean()) if len(vix) >= 50 else v
+        rel = v / m50 if m50 else 1
+        if rel > 1.3: s -= 8
+        elif rel > 1.15: s -= 4
+        s = max(0.0, s)
+        lect = "complacencia" if v < 12 else "calma" if v <= 16 else "normal" if v <= 20 else "tensión" if v <= 30 else "pánico"
+        capas.append({"nombre": "Sentimiento (VIX)", "pts": num(s, 1), "max": 20,
+                      "det": [f"VIX en {v:.1f}: {lect} · {'+' if rel >= 1 else ''}{(rel - 1) * 100:.0f}% contra su media de 50 ruedas"]})
     if not capas: return None
     total = sum(c["pts"] for c in capas) / sum(c["max"] for c in capas) * 100
     # La exposición es una lectura del mercado, no un tamaño de posición
@@ -731,7 +747,48 @@ def regimen(indices, vix, acciones):
     elif total < 60: et, rec, expo = "Cauteloso", "Posiciones chicas y solo los mejores setups.", "25–50%"
     elif total < 80: et, rec, expo = "Favorable", "Mercado acompaña: setups A+ con tamaño normal.", "50–75%"
     else: et, rec, expo = "Expansión", "Viento a favor: exposición plena en los líderes.", "75–100%"
-    return {"score": num(total, 0), "etiqueta": et, "rec": rec, "expo": expo, "capas": capas, "hist200": hist200}
+    return {"score": num(total, 0), "etiqueta": et, "rec": rec, "expo": expo, "capas": capas, "hist200": hist200,
+            "ftd": follow_through(indices), "fng": fear_greed() if MOSTRAR_FEAR_GREED else None}
+
+def follow_through(indices):
+    """Estado de O'Neil en SPY y QQQ: corrección, intento de rally (día N) o follow-through day (suba fuerte con más volumen desde el día 4)."""
+    out = {}
+    for t in ("SPY", "QQQ"):
+        df = indices.get(t)
+        if df is None or len(df) < 80: continue
+        c, v = df.Close.values, df.Volume.values
+        n = len(c)
+        h = n - 60 + int(np.argmax(c[-60:]))           # máximo de cierre de las últimas 60 ruedas
+        lo = h + int(np.argmin(c[h:]))                 # mínimo posterior a ese máximo
+        tope = c[h]
+        caida = (1 - c[lo] / tope) * 100
+        est = {"t": t, "caida": num(caida, 1), "minimo": df.index[lo].strftime("%d-%m"), "dia": n - 1 - lo}
+        if caida < FTD_CORRECCION_MIN:
+            est["estado"] = "sin corrección"
+        else:
+            est["estado"] = "intento de rally" if n - 1 > lo else "corrección"
+            for i in range(lo + 4, n):
+                sube = (c[i] / c[i - 1] - 1) * 100
+                if sube >= FTD_SUBA_MIN and v[i] > v[i - 1] and c[lo + 1:i + 1].min() > c[lo]:
+                    est.update({"estado": "follow-through", "ftd": df.index[i].strftime("%Y-%m-%d"), "ftd_dia": i - lo, "suba": num(sube, 2)})
+                    break
+        out[t] = est
+    return out
+
+def fear_greed():
+    """Fear & Greed de CNN (fuente no oficial; si falla queda s/d)."""
+    import requests
+    try:
+        r = requests.get("https://production.dataviz.cnn.io/index/fearandgreed/graphdata", timeout=20, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*", "Origin": "https://edition.cnn.com", "Referer": "https://edition.cnn.com/"})
+        f = r.json()["fear_and_greed"]
+        es = {"extreme fear": "miedo extremo", "fear": "miedo", "neutral": "neutral", "greed": "codicia", "extreme greed": "codicia extrema"}
+        return {"score": num(f["score"], 0), "rating": es.get(f.get("rating"), f.get("rating")),
+                "semana": num(f.get("previous_1_week"), 0), "mes": num(f.get("previous_1_month"), 0)}
+    except Exception as e:
+        print(f"   ⚠️ Fear & Greed: {e}")
+        return None
 
 # ---------------------------------------------------------------- AVWAP
 def avwap_desde(df, i):
@@ -1186,14 +1243,21 @@ def armar_resumen(activos, fecha, reg, selh, rot, diario):
         # Sentimiento en una línea: miedo por VIX, presión vendedora por días de distribución y tendencia de la amplitud
         import re
         txt = " ".join(x for c in reg["capas"] for x in c["det"])
-        vix = re.search(r"VIX en ([\d.]+): ([^.]+)", txt)
+        vix = re.search(r"VIX en ([\d.]+): (\w+)(?: · ([+-]?\d+)% contra)?", txt)
         dd = [int(x) for x in re.findall(r"(\d+) días de distribución", txt)]
         partes = []
-        if vix: partes.append({"zona sana": "calma", "complacencia": "complacencia (cuidado con el exceso de confianza)",
-                               "tensión": "tensión", "pánico": "pánico"}.get(vix.group(2).strip(), vix.group(2)) + f" (VIX {f2(float(vix.group(1)))})")
+        if vix: partes.append({"complacencia": "complacencia (cuidado con el exceso de confianza)", "calma": "calma", "normal": "volatilidad normal",
+                               "tensión": "tensión", "pánico": "pánico"}.get(vix.group(2), vix.group(2)) + f" (VIX {f2(float(vix.group(1)))}" + (", subiendo fuerte" if vix.group(3) and int(vix.group(3)) >= 15 else "") + ")")
         if dd: partes.append("presión vendedora en los índices" if max(dd) >= 6 else "distribución moderada" if max(dd) >= 4 else "sin distribución relevante")
         if len(h) > 10: partes.append("la amplitud acompaña" if h[-1][1] >= h[-11][1] else "la amplitud se deteriora")
+        fg = reg.get("fng")
+        if fg: partes.append(f"Fear & Greed de CNN en {fg['score']:.0f} ({fg['rating']}; hace una semana {fg['semana']:.0f})")
         if partes: L.append("<b>Sentimiento:</b> " + ", ".join(partes) + ".")
+        for t, e in (reg.get("ftd") or {}).items():
+            if e["estado"] == "follow-through": L.append(f"• {t}: follow-through day el {pd.Timestamp(e['ftd']).strftime('%d-%m')} (día {e['ftd_dia']} del rally, +{f2(e['suba'], 2)}%)")
+            elif e["estado"] == "intento de rally": L.append(f"• {t}: intento de rally, día {e['dia']} desde el mínimo del {e['minimo']} (cayó {f2(e['caida'], 1)}%); falta el follow-through")
+        if fg and fg["score"] <= 25:
+            L.append("<i>Miedo extremo: buen momento para armar la lista de seguimiento; para comprar rupturas conviene esperar el follow-through.</i>")
         L.append(f"<i>{reg['rec']}</i>")
     if rot and rot.get("etfs"):
         lid, mej, deb = [], [], []
@@ -1220,7 +1284,7 @@ def armar_resumen(activos, fecha, reg, selh, rot, diario):
         L += ["", "<b>Earnings (3 días):</b> " + ", ".join(f"{a['t']} {cuando(a['earn_dias'])}" for a in ev)]
     return "\n".join(L)[:3900]
 
-def alertas_telegram(activos, fecha, resumen=None):
+def alertas_telegram(activos, fecha, resumen=None, regimen_ftd=None):
     """Manda por Telegram las Seleccionadas que hoy rompen su pivot VCP o su AVWAP con volumen (una vez por día y ticker)."""
     import os, requests
     token = os.environ.get("TELEGRAM_TOKEN", "").strip()
@@ -1248,6 +1312,11 @@ def alertas_telegram(activos, fecha, resumen=None):
             # Primer uso: un mensaje de prueba para confirmar que el bot llega
             msgs.append(f"✅ <b>{NOMBRE_DASHBOARD}</b> conectado. Te aviso acá cuando una Seleccionada rompa su pivot VCP o una AVWAP con volumen.")
         env["_conectado"] = "9999-12-31"
+        for t, e in ((regimen_ftd or {}).items()):
+            if e.get("estado") == "follow-through" and e.get("ftd") == fecha and f"_ftd:{t}:{fecha}" not in env:
+                msgs.append(f"🟢 <b>Follow-through day en {t}</b>: +{e['suba']:.2f}% con más volumen, día {e['ftd_dia']} del rally. "
+                            "Señal clásica de O'Neil para volver a comprar rupturas.")
+                env[f"_ftd:{t}:{fecha}"] = fecha
         if resumen and f"_resumen:{fecha}" not in env:
             msgs.append(resumen); env[f"_resumen:{fecha}"] = fecha
         for a in activos:
@@ -1520,7 +1589,7 @@ def correr():
     if RESUMEN_DIARIO and ahora_ar().hour >= 18:
         try: resumen = armar_resumen(activos, fecha_iso, reg, selh, rot, diario)
         except Exception as e: print(f"   ⚠️ Resumen: {e}")
-    n_al = alertas_telegram(activos, fecha_iso, resumen)
+    n_al = alertas_telegram(activos, fecha_iso, resumen, (reg or {}).get("ftd"))
     print(f"   Seleccionadas: {sum(es_seleccionada(a) for a in activos)} · alertas enviadas: {n_al}")
     print(f"   Top {TOP_N}: {top['medio']}% promedio en {top['ruedas']} ruedas vs SPY {top['spy']}%")
     print(f"   Lista de foco: {len(foco)}")
@@ -1683,6 +1752,7 @@ h2.sec small{color:var(--muted);font-family:var(--ui);text-transform:none;letter
 .scp{display:inline-block;min-width:38px;text-align:center;padding:2px 8px;border-radius:999px;border:1px solid color-mix(in srgb,var(--acc) 45%,transparent);color:var(--acc);font-family:var(--mono)}
 .rbar{display:inline-block;width:110px;height:8px;border-radius:4px;background:var(--line);overflow:hidden}
 .rbar i{display:block;height:100%;border-radius:4px;background:var(--acc)}.rbar i.neg{background:var(--down)}
+b.warn,span.warn{color:var(--warn)}
 .ci em.rc{color:#EF6C00}.ci em.rv{color:var(--blue)}
 .expo{color:var(--warn)}
 .tvexp{font-size:13px;padding:7px 12px}
@@ -1980,6 +2050,17 @@ function tabla(cols, rows, vacio){
 const card = (titulo, sub, cuerpo) => `<div class="card"><h3>${titulo}${sub!=null?` <small>${sub}</small>`:''}</h3>${cuerpo}</div>`;
 
 /* ---------- Inicio ---------- */
+function regExtra(R){
+  const fg = R.fng, F = R.ftd || {};
+  const fgC = !fg ? '' : fg.score<=25 ? 'down' : fg.score<45 ? 'warn' : fg.score<=55 ? 'mut' : 'up';
+  const ftdTxt = Object.values(F).map(e => e.estado==='follow-through' ? `<span class="up">${esc(e.t)}: follow-through el ${esc(fechaCorta(e.ftd))} (día ${e.ftd_dia}, +${fmt(e.suba,2)}%)</span>`
+    : e.estado==='intento de rally' ? `<span class="warn">${esc(e.t)}: intento de rally, día ${e.dia} desde el ${esc(e.minimo)} (−${fmt(e.caida,1)}%)</span>`
+    : `<span class="mut">${esc(e.t)}: ${esc(e.estado)}</span>`).join(' · ');
+  return `<div class="kv" style="margin-top:12px">
+    <span>Fear &amp; Greed (CNN)</span><span>${fg ? `<b class="${fgC}">${fmt(fg.score,0)} · ${esc(fg.rating)}</b> <span class="mut">semana ${fmt(fg.semana,0)} · mes ${fmt(fg.mes,0)}</span>` : 's/d'}</span>
+    <span>Follow-through (O'Neil)</span><span>${ftdTxt || 's/d'}</span></div>
+    ${fg && fg.score<=25 ? '<p class="nota" style="margin:8px 0 0">Miedo extremo: dato contrario, no suma al score. Buen momento para armar la lista; para comprar rupturas conviene esperar el follow-through.</p>' : ''}`;
+}
 function area(h){
   const w = 600, ht = 90, v = h.map(x=>x[1]), mn = Math.max(0, Math.min(...v) - 5), mx = Math.min(100, Math.max(...v) + 5);
   const X = i => i/(h.length-1)*w, Y = x => ht - (x-mn)/(mx-mn||1)*ht;
@@ -2031,6 +2112,7 @@ function vInicio(){
     <div class="reg"><div class="gauge">${gauge(R.score)}<div class="v"><b>${fmt(R.score,0)}</b><span style="color:${R.score<40?'var(--down)':R.score<60?'var(--warn)':'var(--acc)'}">${esc(R.etiqueta)}</span></div></div>
       <div class="capas">${R.capas.map(c=>`<div class="capa"><div class="fila"><span>${esc(c.nombre)}</span><span>${fmt(c.pts,0)} / ${c.max}</span></div>
         <div class="pbar"><i style="width:${c.pts/c.max*100}%"></i></div>${c.det.map(d=>`<small>${esc(d)}</small>`).join('')}</div>`).join('')}</div></div>
+    ${regExtra(R)}
     ${(R.hist200||[]).length>2 ? `<div class="h200"><small class="mut">% de acciones líquidas sobre su EMA200 · últimas ${R.hist200.length} ruedas</small>${area(R.hist200)}</div>` : ''}
     <div class="rec">${R.expo ? `<b class="expo">Exposición sugerida: ${esc(R.expo)}</b> · ` : ''}${esc(R.rec)} <span class="mut">(lectura del mercado, no tamaño de posición)</span></div></div>` : card('Régimen de mercado', null, '<p class="vacio">No se pudo calcular en esta corrida.</p>');
   const top = act.slice().sort((x,y)=>y.score-x.score).slice(0,3);
