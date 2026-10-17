@@ -1178,8 +1178,13 @@ def alertas_telegram(activos, fecha):
             print("   ⚠️ Telegram: mandale cualquier mensaje al bot para que sepa a qué chat escribir"); return 0
         try: env = json.load(open(ARCHIVO_ALERTAS))
         except Exception: env = {}
+        conectado = env.get("_conectado")
         env = {k: v for k, v in env.items() if v >= (dt.date.today() - dt.timedelta(days=10)).isoformat()}
         msgs = []
+        if not conectado:
+            # Primer uso: un mensaje de prueba para confirmar que el bot llega
+            msgs.append(f"✅ <b>{NOMBRE_DASHBOARD}</b> conectado. Te aviso acá cuando una Seleccionada rompa su pivot VCP o una AVWAP con volumen.")
+        env["_conectado"] = "9999-12-31"
         for a in activos:
             if not es_seleccionada(a): continue
             v, s_ = a.get("vcp"), (a.get("setup_av") or {}).get("d")
