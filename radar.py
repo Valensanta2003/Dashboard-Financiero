@@ -1171,8 +1171,12 @@ def alertas_telegram(activos, fecha):
     try:
         if not chat:
             # Sin chat configurado: se usa el último chat que le escribió al bot
-            res = requests.get(api + "/getUpdates", timeout=20).json().get("result", [])
-            chats = [u.get("message", {}).get("chat", {}).get("id") for u in res if u.get("message")]
+            j = requests.get(api + "/getUpdates", timeout=20).json()
+            if not j.get("ok"):
+                print(f"   ⚠️ Telegram rechazó el token: {j.get('description')}"); return 0
+            res = j.get("result", [])
+            chats = [(u.get("message") or u.get("my_chat_member") or {}).get("chat", {}).get("id") for u in res]
+            chats = [c for c in chats if c]
             chat = str(chats[-1]) if chats and chats[-1] else ""
         if not chat:
             print("   ⚠️ Telegram: mandale cualquier mensaje al bot para que sepa a qué chat escribir"); return 0
@@ -1197,11 +1201,14 @@ def alertas_telegram(activos, fecha):
             if motivo and clave not in env:
                 msgs.append(f"🚀 <b>{a['t']}</b> {motivo}\nScore {a['score']:.0f} · RS {a['rs']:.0f} · {a['mv']}/8 · ${a['precio']:.2f}")
                 env[clave] = fecha
+        enviados = 0
         for m in msgs:
-            requests.post(api + "/sendMessage", timeout=20, data={"chat_id": chat, "parse_mode": "HTML", "disable_web_page_preview": "true",
-                                                                 "text": m + f"\n<a href=\"{URL_DASHBOARD}\">Abrir dashboard</a>"})
-        json.dump(env, open(ARCHIVO_ALERTAS, "w"))
-        return len(msgs)
+            r = requests.post(api + "/sendMessage", timeout=20, data={"chat_id": chat, "parse_mode": "HTML", "disable_web_page_preview": "true",
+                                                                     "text": m + f"\n<a href=\"{URL_DASHBOARD}\">Abrir dashboard</a>"}).json()
+            if r.get("ok"): enviados += 1
+            else: print(f"   ⚠️ Telegram no mandó el mensaje: {r.get('description')}")
+        if enviados or not msgs: json.dump(env, open(ARCHIVO_ALERTAS, "w"))
+        return enviados
     except Exception as e:
         print(f"   ⚠️ Telegram: {e}"); return 0
 
