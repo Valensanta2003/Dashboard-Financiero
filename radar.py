@@ -5,7 +5,7 @@ LEMA = "1% better every day"
 AVATAR_URL = "https://pbs.twimg.com/profile_images/1918682628393148416/lIVS4K5f_400x400.jpg"  # foto de @Valensantaa__; si falla se ve el logo
 # **Requisitos**
 PRECIO_MINIMO = 10
-ADR_MINIMO = 2.0
+ADR_MINIMO = 1.5
 ADR_MINIMO_ETF = 1.0  # los ETFs se mueven menos que una acción (EWZ ronda 2%, SPY 1%)
 ADR_PERIODO = 20
 MIN_CRITERIOS_MINERVINI = 6
@@ -14,7 +14,7 @@ PCT_SOBRE_MINIMO_52S = 25
 PCT_SOBRE_MINIMO_52S_ETF = 15  # índices y ETFs rara vez suben 25% desde su mínimo anual
 PCT_DEBAJO_MAXIMO_52S = 30
 RS_MINIMO = 70
-EXIGIR_AVWAP = True
+EXIGIR_AVWAP = False  # False: las AVWAP suman puntos y se muestran, pero no son requisito para entrar
 ANCLAS_FUERTES = "Earnings, Episodic pivot, Máx. estructural, Máx. histórico, Mín. estructural, Mín. mensual, Mín. histórico, IPO"
 # **AVWAP**
 DIST_POR_ROMPER_DIARIO = 3.0
