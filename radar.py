@@ -1160,7 +1160,7 @@ def cargar_historial(archivo):
         pass
     return hist
 
-def top_retorno(activos, fecha, spy):
+def top_retorno(activos, fecha, spy, diario=None):
     """Guarda el top del día y mide el retorno de las TOP_N actuales desde que entraron (dentro de TOP_RUEDAS) contra el SPY."""
     hist = cargar_historial(ARCHIVO_HISTORIAL)
     rank = sorted(activos, key=lambda a: -a["score"])
@@ -1183,11 +1183,27 @@ def top_retorno(activos, fecha, spy):
         ini = spy[spy.index <= pd.Timestamp(ventana[0])]
         if len(ini): r_spy = num((spy.iloc[-1] / ini.iloc[-1] - 1) * 100, 2)
     rets = [f["ret"] for f in filas if f["ret"] is not None]
+    # Segunda lectura (estilo Warren): de todas las que pasaron por el Top en la ventana, las TOP_N que más ganaron desde que entraron.
+    # Es optimista: elige las mejores sabiendo el resultado.
+    mejores = []
+    hoy_top = set(tops[fecha]) if fecha in tops else set()
+    for t in {t for f in ventana for t in tops[f]}:
+        entro = next(f for f in ventana if t in tops[f])
+        base = hist[entro][t][1]
+        d = diario.get(t) if diario else None
+        ahora = float(d.Close.iloc[-1]) if d is not None and len(d) else None
+        if not base or not ahora: continue
+        ult = max(f for f in ventana if t in hist[f])
+        mejores.append({"t": t, "score": hist[ult][t][0], "entro": entro, "ret": num((ahora / base - 1) * 100, 2), "sigue": t in hoy_top,
+                        "spark": [num(x, 4) for x in d.Close.iloc[-max(TOP_RUEDAS, 10):].values]})
+    mejores = sorted(mejores, key=lambda x: -x["ret"])[:TOP_N]
+    rm = [x["ret"] for x in mejores]
     hoy30 = [a["t"] for a in rank[:30]]
     ant30 = set(sorted(hist[fechas[-2]], key=lambda t: -hist[fechas[-2]][t][0])[:30]) if len(fechas) >= 2 else None
     nuevos = [t for t in hoy30 if ant30 is not None and t not in ant30]
     return {"nuevos": nuevos, "nuevos_desde": fechas[-2] if len(fechas) >= 2 else None, "ruedas": len(ventana), "desde": ventana[0] if ventana else fecha, "spy": r_spy,
-            "medio": num(sum(rets) / len(rets), 2) if rets else None, "filas": filas}
+            "medio": num(sum(rets) / len(rets), 2) if rets else None, "filas": filas,
+            "mejores": mejores, "medio_mejores": num(sum(rm) / len(rm), 2) if rm else None}
 
 # ---------------------------------------------------------------- seleccionadas: track record y alertas
 ARCHIVO_SEL = "historial_sel.json"
@@ -1589,7 +1605,7 @@ def correr():
         a["calor"] = num(0.6 * a["score"] + 0.4 * a.pop("_r21p"), 1)
     foco = lista_foco(activos)
     fecha_iso = max(df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto").strftime("%Y-%m-%d")
-    top = top_retorno(activos, fecha_iso, spy_c)
+    top = top_retorno(activos, fecha_iso, spy_c, diario)
     nombres = {t: str((perf.get(t) or {}).get("nombre") or info.at[t, "nombre"]) for t in liquidas}
     cart = cartelera(diario, liquidas, nombres)
     por_semana = rs_semanas(diario)
@@ -1618,7 +1634,7 @@ def correr():
                    "vcp_min": VCP_MIN_CONTRACCIONES, "vcp_ult": VCP_ULTIMA_MAX, "vcp_form": VCP_FORMANDO_MAX, "vcp_dist": VCP_DIST_PIVOT,
                    "vcp_seco": VCP_VOL_SECO, "vcp_dias": VCP_DIAS_RUPTURA, "vcp_seg": VCP_DIAS_SEGUIMIENTO,
                    "vcp_smin": VCP_SEMANAS_MIN, "vcp_smax": VCP_SEMANAS_MAX, "emas_asc": EMAS_ASCENSO,
-                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "rsi_alto": RSI_SOBRECOMPRA, "rsi_bajo": RSI_SOBREVENTA, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS,
+                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "rsi_alto": RSI_SOBRECOMPRA, "rsi_bajo": RSI_SOBREVENTA, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS, "top_n": TOP_N,
                    "pts": {"tend": PUNTOS_TENDENCIA, "rs": PUNTOS_RS, "contr": PUNTOS_COMPRESION, "setup": PUNTOS_SETUP, "fund": PUNTOS_FUNDAMENTALES}, "est10": ESTIRADA_EMA10_ADR, "est20": ESTIRADA_EMA20_ADR,
                    "foco_rs": FOCO_RS_MINIMO, "foco_riesgo": FOCO_RIESGO_MAX, "foco_max": FOCO_MAXIMO}},
         "foco": foco, "activos": sorted(activos, key=lambda a: -a["score"])}
@@ -2172,10 +2188,18 @@ function vInicio(){
       {h:'Retorno', n:1, f:r=>`<b class="${cls(r.f.ret)}">${pct(r.f.ret)}</b>`},
     ];
     const idx = Object.fromEntries(D.activos.map(a=>[a.t,a]));
-    return `<div class="foco">${card(`Retorno Top ${T.filas.length} del score`, `últimas ${T.ruedas} ${T.ruedas===1?'rueda':'ruedas'} desde ${esc(fechaCorta(T.desde))}`,
+    const M = T.mejores || [];
+    const mxM = Math.max(...M.map(f=>Math.abs(f.ret||0)), 0.01);
+    const colsM = cols.map(c => c.h==='' && String(c.f).includes('rbar') ? {h:'', f:r=>`<span class="rbar"><i class="${r.f.ret<0?'neg':''}" style="width:${Math.abs(r.f.ret||0)/mxM*100}%"></i></span>`} : c)
+      .concat([{h:'Sigue', f:r=>r.f.sigue?'<span class="up">sí</span>':'<span class="mut">no</span>'}]);
+    const segunda = M.length ? `<div class="foco">${card(`Top ${M.length} por retorno`, `las que más ganaron entre todas las que pasaron por el Top ${P.top_n} en ${T.ruedas} ${T.ruedas===1?'rueda':'ruedas'} · estilo Warren`,
+      `<div class="tbigs">${big(`Retorno medio`, T.medio_mejores)}${big('SPY', T.spy)}</div>`
+      + tabla(colsM, M.map((f,i)=>({f, i, a: idx[f.t] || {t:f.t}})), '')
+      + `<p class="nota" style="margin:10px 0 0">Lectura optimista: elige las mejores sabiendo el resultado. La tarjeta de arriba (Top actual por score) es la medición honesta.</p>`)}</div>` : '';
+    return `<div class="foco">${card(`Top ${T.filas.length} actual por score`, `retorno desde que entraron · últimas ${T.ruedas} ${T.ruedas===1?'rueda':'ruedas'} desde ${esc(fechaCorta(T.desde))}`,
       `<div class="tbigs">${big(`Retorno medio Top ${T.filas.length}`, T.medio)}${big('SPY', T.spy)}</div>`
       + tabla(cols, T.filas.filter(f=>idx[f.t]).map((f,i)=>({f, i, a:idx[f.t]})), '')
-      + (T.ruedas < P.top_ruedas ? `<p class="nota" style="margin:10px 0 0">El historial arrancó hace ${T.ruedas} ${T.ruedas===1?'rueda':'ruedas'}: hasta juntar ${P.top_ruedas}, la ventana es más corta.</p>` : ''))}</div>`;
+      + (T.ruedas < P.top_ruedas ? `<p class="nota" style="margin:10px 0 0">El historial arrancó hace ${T.ruedas} ${T.ruedas===1?'rueda':'ruedas'}: hasta juntar ${P.top_ruedas}, la ventana es más corta.</p>` : ''))}</div>` + segunda;
   })() : '';
   const idx2 = Object.fromEntries(D.activos.map(a=>[a.t,a]));
   const nv = (T && T.nuevos || []).filter(t=>idx2[t]).map(t=>idx2[t]);
