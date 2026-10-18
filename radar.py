@@ -1148,10 +1148,21 @@ def cierres_apretados(df, wk, vcp=None):
 # ---------------------------------------------------------------- retorno del top del score
 ARCHIVO_HISTORIAL = "historial_top.json"
 
+def cargar_historial(archivo):
+    """Historial guardado entre corridas, completado con la semilla del repo (semillas/) para los días que falten."""
+    import os
+    try: hist = json.load(open(archivo))
+    except Exception: hist = {}
+    try:
+        for f, v in json.load(open(os.path.join("semillas", archivo))).items():
+            hist.setdefault(f, v)
+    except Exception:
+        pass
+    return hist
+
 def top_retorno(activos, fecha, spy):
     """Guarda el top del día y mide el retorno de las TOP_N actuales desde que entraron (dentro de TOP_RUEDAS) contra el SPY."""
-    try: hist = json.load(open(ARCHIVO_HISTORIAL))
-    except Exception: hist = {}
+    hist = cargar_historial(ARCHIVO_HISTORIAL)
     rank = sorted(activos, key=lambda a: -a["score"])
     hist[fecha] = {a["t"]: [a["score"], a["precio"]] for a in rank[:max(30, TOP_N)]}
     fechas = sorted(hist)[-60:]
@@ -1189,8 +1200,7 @@ def es_seleccionada(a):
 
 def track_seleccionadas(activos, fecha, diario, spy):
     """Guarda las Seleccionadas del día y mide el retorno de cada ingreso de las últimas SEL_HISTORIA_RUEDAS ruedas vs el SPY."""
-    try: hist = json.load(open(ARCHIVO_SEL))
-    except Exception: hist = {}
+    hist = cargar_historial(ARCHIVO_SEL)
     hist[fecha] = {a["t"]: a["precio"] for a in activos if es_seleccionada(a)}
     fechas = sorted(hist)[-120:]
     hist = {f: hist[f] for f in fechas}
@@ -1570,6 +1580,10 @@ def correr():
             a["fund"]["pe"] = num(a["precio"] / a["fund"]["eps_ttm"], 1)
         p = partes_score(a["mv"], a["rs"], a["comp"]["d"], a["setup_av"]["d"],
                          a["comp"]["d"] and a["comp"]["d"]["ruptura"], a["inside"]["d"], a["pivot30"], a["vcp"], a["fund"], a["tc"])
+        if a["tipo"] != "accion" and 0 < PUNTOS_FUNDAMENTALES < 100:
+            # ETFs y cripto no tienen balances: el pilar no aplica y los otros cuatro se reescalan a 100
+            k = 100 / (100 - PUNTOS_FUNDAMENTALES)
+            p = {c: (num(v * k, 1) if c != "fund" else None) for c, v in p.items()}
         a["partes"] = p
         malas = [f for f in a["flags"] if f["k"] in ("rechazo", "sinvol", "ext", "estirada")]
         a["castigo"] = num(len(malas) * SCORE_CASTIGO_BANDERA, 1)
@@ -2003,6 +2017,8 @@ const tend = a => `<span class="tend">${xo8(a)}<span class="ars">${(a.pend||[]).
 const adrC = v => v==null ? '<span class="mut">s/d</span>' : `<span class="adr${v<1.5?0:v<2.5?1:v<4.5?2:v<6?3:4}">${fmt(v,2)}%</span>`;
 const volx = a => a.vol_pct==null ? '–' : `<span class="${a.vol_pct>0?'up':'mut'}">${pct(a.vol_pct,0)}</span>`;
 const PILARES = [['Tendencia','tend',P.pts.tend,'var(--blue)'],['Fuerza RS','rs',P.pts.rs,'var(--acc)'],['Contracción','contr',P.pts.contr,'var(--violet)'],['Setup','setup',P.pts.setup,'var(--warn)'],['Fundamentales','fund',P.pts.fund,'#e879a6']];
+const pilares = a => (a.partes && a.partes.fund==null && a.tipo!=='accion')
+  ? PILARES.filter(x=>x[1]!=='fund').map(([n,k,m,c])=>[n, k, +(m*100/(100-P.pts.fund)).toFixed(1), c]) : PILARES;
 const TEND = {h:'Tendencia', f:r=>tend(r.a)};
 const VOLX = {h:'Vol. vs prom. 50', n:1, f:r=>volx(r.a)};
 const insB = a => { const b = [['d','D'],['w','W']].filter(([k])=>a.inside[k]&&a.inside[k].n).map(([k,l])=>{ const n=a.inside[k].n; return `<span class="ins" title="${n} inside ${k==='d'?'day':'week'}${n>1?' seguidos':''}">${n>1?n:''}I${l}</span>`; }); return b.length ? b.join(' ') : '<span class="mut">–</span>'; };
@@ -2131,10 +2147,9 @@ function vInicio(){
   const foco = `<div class="foco">${card('Lista de foco', fl.length ? fl.length+' para hoy' : null,
     `<p class="nota" style="margin:0 0 10px">Hasta ${P.foco_max} activos con un setup listo (VCP armada o recién rota, compresión con EMAs en ascenso cerca del gatillo o rota, ruptura de AVWAP con volumen), RS ${P.foco_rs}+, riesgo de ${fmt(P.foco_riesgo,0)}% o menos y sin banderas (estirada de la EMA10/20, extendido, sin volumen, rechazo, earnings en 7 días). Ordenados por score.${R && R.score<40 ? ' <b>Régimen defensivo: tamaño chico o esperar.</b>' : ''}</p>`
     + tabla(cFo, fl.map(r=>({...r, a:idx[r.t]})), 'Ningún setup cumple todo hoy. Mejor esperar que forzar.'))}</div>`;
-  const PT = PILARES;
   const spot = top.length ? `<div class="grid g3">${top.map(a=>`<div class="card spot" data-t="${esc(a.t)}" tabindex="0">
       <div class="cab">${ring(a.score)}<div><h4>${esc(a.t)}</h4><p>${esc(a.sector)}${a.estadio?' · estadio '+a.estadio:''}</p><p>${flags(a,3)}</p></div></div>
-      <div class="partes">${PT.map(([n,k,m,c])=>`<span class="mut">${n}</span><span class="pbar"><i style="width:${(a.partes[k]||0)/m*100}%;background:${c}"></i></span><span>${fmt(a.partes[k]||0,0)}</span>`).join('')}</div></div>`).join('')}</div>`
+      <div class="partes">${pilares(a).map(([n,k,m,c])=>`<span class="mut">${n}</span><span class="pbar"><i style="width:${(a.partes[k]||0)/m*100}%;background:${c}"></i></span><span>${fmt(a.partes[k]||0,0)}</span>`).join('')}</div></div>`).join('')}</div>`
     : '<p class="vacio">Sin activos con estos filtros.</p>';
   const ev = act.filter(a=>a.earn_dias!=null && a.earn_dias>=0 && a.earn_dias<=7).sort((x,y)=>x.earn_dias-y.earn_dias);
   const earn = ev.length ? `<div class="earn">${ev.map(a=>`<div class="eitem" data-t="${esc(a.t)}" tabindex="0"><b>${esc(a.t)}</b>
@@ -2529,7 +2544,7 @@ function rsLinea(v){
 }
 function ficha(t){
   const a = D.activos.find(x=>x.t===t); if(!a) return;
-  const PT = PILARES;
+  const PT = pilares(a);
   const tvSym = a.tipo==='cripto' ? a.t.replace('-','') : a.t.replace('-','.');
   const avt = tf => (a.avwap[tf]||[]).length ? `<div class="tw"><table><thead><tr><th>Ancla</th><th class="n">AVWAP</th><th class="n">Dist.</th><th class="n">Vol.</th><th>Estado</th></tr></thead><tbody>${
       a.avwap[tf].map(x=>`<tr><td>${esc(x.ancla)}${x.fuerte?'<span class="fuerte">★</span>':''} <span class="mut">${esc(x.fecha)}</span></td><td class="n">${pr(x.valor)}</td><td class="n ${cls(x.dist)}">${pct(x.dist)}</td><td class="n">${x.vol_x!=null?fmt(x.vol_x,1)+'x':'–'}</td><td>${badge(x.estado)}${(x.estado==='rompe'||x.estado==='por romper')&&!x.cuenta?' <span class="mut" title="No cuenta: rompió sin volumen o ancla débil">no cuenta</span>':''}</td></tr>`).join('')}</tbody></table></div>` : '<p class="vacio">Sin anclas.</p>';
