@@ -1154,8 +1154,12 @@ def cargar_historial(archivo):
     try: hist = json.load(open(archivo))
     except Exception: hist = {}
     try:
-        for f, v in json.load(open(os.path.join("semillas", archivo))).items():
-            hist.setdefault(f, v)
+        semilla = json.load(open(os.path.join("semillas", archivo)))
+        ult = max(semilla)
+        # La semilla manda en los días reconstruidos; su último día solo completa si la corrida en vivo no lo tiene
+        for f, v in semilla.items():
+            if f < ult: hist[f] = v
+            else: hist.setdefault(f, v)
     except Exception:
         pass
     return hist
