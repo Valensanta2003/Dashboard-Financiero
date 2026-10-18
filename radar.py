@@ -1173,10 +1173,8 @@ def top_retorno(activos, fecha, spy):
     tops = {f: [t for t, _ in sorted(hist[f].items(), key=lambda x: -x[1][0])[:TOP_N]] for f in ventana}
     filas = []
     for a in rank[:TOP_N]:
-        entro = fecha
-        for f in reversed(ventana):
-            if a["t"] in tops[f]: entro = f
-            else: break
+        # Entrada = primera vez que figuró en el Top dentro de la ventana (aunque haya salido y vuelto)
+        entro = next((f for f in ventana if a["t"] in tops[f]), fecha)
         base = hist[entro][a["t"]][1]
         filas.append({"t": a["t"], "score": a["score"], "entro": entro, "ret": num((a["precio"] / base - 1) * 100, 2) if base else None,
                       "spark": a["spark_d"][-max(TOP_RUEDAS, 10):]})
