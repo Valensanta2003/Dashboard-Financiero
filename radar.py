@@ -1881,6 +1881,8 @@ b.warn,span.warn{color:var(--warn)}
 .eve{display:flex;flex-wrap:wrap;gap:5px}.evt{font-size:12px;font-weight:700;padding:2px 7px;border:1px solid var(--line2);border-radius:7px;cursor:pointer;font-family:var(--mono)}
 .evt.sel{border-color:var(--acc);color:var(--acc)}.evt i{font-style:normal;font-size:9.5px;color:var(--muted);margin-left:4px}
 .cartsel{display:inline-flex;gap:6px}.cartsel .chip{padding:3px 10px;font-size:12px}
+.ambas{font-size:11px;font-weight:700;color:var(--warn);white-space:nowrap}
+.dos .card{min-width:0}
 .tvexp{font-size:13px;padding:7px 12px}
 .h200{margin-top:14px}.h200 small{display:block;margin-bottom:4px;font-size:12px}
 svg .ax{font-size:11px;fill:var(--muted);font-family:var(--mono)}
@@ -2268,9 +2270,10 @@ function vInicio(){
   const top = act.slice().sort((x,y)=>y.score-x.score).slice(0,3);
   const idx = Object.fromEntries(D.activos.map(a=>[a.t,a]));
   const fl = (D.foco||[]).filter(f=>idx[f.t] && visibles(true).includes(idx[f.t]));
+  let AMBAS = new Set();
+  const ambas = t => AMBAS.has(t) ? ' <span class="ambas" title="Está en la Lista de foco y en la Crème de la crème">⭐ ambas</span>' : '';
   const cFo = [
-    {h:'Ticker', f:r=>tk(idx[r.t])},
-    TEND,
+    {h:'Ticker', f:r=>tk(idx[r.t])+ambas(r.t)},
     {h:'Setup', f:r=>esc(r.setup)},
     {h:'Entrada', n:1, f:r=>pr(r.entrada)},
     {h:'Stop', n:1, f:r=>pr(r.stop)},
@@ -2278,9 +2281,9 @@ function vInicio(){
     {h:'Precio vs. entrada', n:1, f:r=>`<span class="${cls(r.dist)}">${pct(r.dist)}</span>`},
     {h:'Score', n:1, f:r=>fmt(r.score,0)},
   ];
-  const foco = `<div class="foco">${card('Lista de foco', fl.length ? fl.length+' para hoy' : null,
-    `<p class="nota" style="margin:0 0 10px">Hasta ${P.foco_max} activos con un setup listo (VCP armada o recién rota, compresión con EMAs en ascenso cerca del gatillo o rota, ruptura de AVWAP con volumen), RS ${P.foco_rs}+, riesgo de ${fmt(P.foco_riesgo,0)}% o menos y sin banderas (estirada de la EMA10/20, extendido, sin volumen, rechazo, earnings en 7 días). Ordenados por score.${R && R.score<40 ? ' <b>Régimen defensivo: tamaño chico o esperar.</b>' : ''}</p>`
-    + tabla(cFo, fl.map(r=>({...r, a:idx[r.t]})), 'Ningún setup cumple todo hoy. Mejor esperar que forzar.'))}</div>`;
+  const focoF = () => card('Lista de foco', fl.length ? fl.length+' listas para operar' : null,
+    `<p class="nota" style="margin:0 0 10px">Hasta ${P.foco_max} con setup fuerte (VCP, compresión o ruptura de AVWAP con volumen), RS ${P.foco_rs}+, riesgo de ${fmt(P.foco_riesgo,0)}% o menos y sin banderas ni earnings en 7 días.${R && R.score<40 ? ' <b>Régimen defensivo: tamaño chico o esperar.</b>' : ''}</p>`
+    + tabla(cFo, fl.map(r=>({...r, a:idx[r.t]})), 'Ningún setup cumple todo hoy. Mejor esperar que forzar.'));
   const spot = top.length ? `<div class="grid g3">${top.map(a=>`<div class="card spot" data-t="${esc(a.t)}" tabindex="0">
       <div class="cab">${ring(a.score)}<div><h4>${esc(a.t)}</h4><p>${esc(a.sector)}${a.estadio?' · estadio '+a.estadio:''}</p><p>${flags(a,3)}</p></div></div>
       <div class="partes">${pilares(a).map(([n,k,m,c])=>`<span class="mut">${n}</span><span class="pbar"><i style="width:${(a.partes[k]||0)/m*100}%;background:${c}"></i></span><span>${fmt(a.partes[k]||0,0)}</span>`).join('')}</div></div>`).join('')}</div>`
@@ -2390,20 +2393,20 @@ function vInicio(){
   const crema = sel.map(a=>({a, g:gatillo(a)})).filter(x=>x.g);
   const cCr = [
     {h:'', f:r=>`<span class="rk">${r.i+1}</span>`},
-    {h:'Ticker', f:r=>tk(r.a)},
-    TEND,
+    {h:'Ticker', f:r=>tk(r.a)+ambas(r.a.t)},
     {h:'Gatillo', f:r=>`<b>${esc(r.g.m)}</b>`},
     {h:'Entrada', n:1, f:r=>pr(r.g.e)},
     {h:'Stop', n:1, f:r=>pr(r.g.st)},
     {h:'Riesgo', n:1, f:r=>r.g.e&&r.g.st&&r.g.e>r.g.st ? fmt((r.g.e-r.g.st)/r.g.e*100,1)+'%' : '–'},
     {h:'Precio vs. gatillo', n:1, f:r=>r.g.d!=null ? `<span class="${cls(r.g.d)}">${pct(r.g.d)}</span>` : '–'},
     {h:'Score', n:1, f:r=>`<span class="scp">${fmt(r.a.score,0)}</span>`},
-    {h:'Sector', f:r=>`<span class="mut">${esc(r.a.sector)}</span>`},
   ];
-  const cremaH = `<div class="foco">${card('Crème de la crème', `${crema.length} · Seleccionadas con el gatillo a ${fmt(CERCA,0)}% o menos (o recién roto)`,
-    tabla(cCr, crema.map((x,i)=>({a:x.a, g:x.g, i})), 'Ninguna Seleccionada tiene un gatillo cerca hoy.')
-    + `<p class="nota" style="margin:10px 0 0">Precio vs. gatillo: negativo = falta para la entrada; positivo = ya rompió. Sin entrada definida en TC: mirá el pivot en el gráfico.</p>`)}</div>`;
-  return `${foco}${cremaH}${selH}${trackH}${topH}<div class="grid inicio">${reg}${kpis}</div><div class="grid g2" style="margin-top:18px">${nuevos}${cart}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
+  AMBAS = new Set(crema.map(x=>x.a.t).filter(t=>fl.some(f=>f.t===t)));
+  const cremaF = () => card('Crème de la crème', `${crema.length} Seleccionadas con gatillo a ${fmt(CERCA,0)}% o menos`,
+    `<p class="nota" style="margin:0 0 10px">Las mejores (RS ${(P.sel||{}).rs||80}+, ${(P.sel||{}).mv||7}/8, score ${(P.sel||{}).score||70}+) con un gatillo cerca o recién roto. Precio vs. gatillo: negativo = falta; positivo = ya rompió.</p>`
+    + tabla(cCr, crema.map((x,i)=>({a:x.a, g:x.g, i})), 'Ninguna Seleccionada tiene un gatillo cerca hoy.'));
+  const dosH = `<div class="grid g2 dos foco">${focoF()}${cremaF()}</div>${AMBAS.size ? `<p class="nota" style="margin:-8px 0 16px">⭐ ambas = está en las dos listas: ${[...AMBAS].map(esc).join(', ')}.</p>` : ''}`;
+  return `${dosH}${selH}${trackH}${topH}<div class="grid inicio">${reg}${kpis}</div><div class="grid g2" style="margin-top:18px">${nuevos}${cart}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
     <h2 class="sec">Top 3 del score</h2>${spot}
     <h2 class="sec">Eventos de la semana <small>macro de EE.UU. de impacto y earnings de las acciones del radar · hora Argentina</small></h2>
     ${eventosSemana()}`;
