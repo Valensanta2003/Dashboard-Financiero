@@ -1716,7 +1716,7 @@ def correr():
                    "vcp_min": VCP_MIN_CONTRACCIONES, "vcp_ult": VCP_ULTIMA_MAX, "vcp_form": VCP_FORMANDO_MAX, "vcp_dist": VCP_DIST_PIVOT,
                    "vcp_seco": VCP_VOL_SECO, "vcp_dias": VCP_DIAS_RUPTURA, "vcp_seg": VCP_DIAS_SEGUIMIENTO,
                    "vcp_smin": VCP_SEMANAS_MIN, "vcp_smax": VCP_SEMANAS_MAX, "emas_asc": EMAS_ASCENSO,
-                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "rsi_alto": RSI_SOBRECOMPRA, "cart_n": CARTELERA_N, "rsi_bajo": RSI_SOBREVENTA, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS, "top_n": TOP_N,
+                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "rsi_alto": RSI_SOBRECOMPRA, "resumen_cerca": RESUMEN_CERCA, "cart_n": CARTELERA_N, "rsi_bajo": RSI_SOBREVENTA, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS, "top_n": TOP_N,
                    "pts": {"tend": PUNTOS_TENDENCIA, "rs": PUNTOS_RS, "contr": PUNTOS_COMPRESION, "setup": PUNTOS_SETUP, "fund": PUNTOS_FUNDAMENTALES}, "est10": ESTIRADA_EMA10_ADR, "est20": ESTIRADA_EMA20_ADR,
                    "foco_rs": FOCO_RS_MINIMO, "foco_riesgo": FOCO_RIESGO_MAX, "foco_max": FOCO_MAXIMO}},
         "foco": foco, "activos": sorted(activos, key=lambda a: -a["score"])}
@@ -2365,7 +2365,37 @@ function vInicio(){
         {h:'Sigue', f:r=>r.f.sigue?'<span class="up">sí</span>':'<span class="mut">no</span>'},
       ], H.filas.map(f=>({f, a: idx2[f.t] || {t:f.t}})), 'Todavía no hay ingresos registrados: se van sumando desde hoy.')
     + (H.ruedas < 5 ? `<p class="nota" style="margin:10px 0 0">El registro arrancó hace ${H.ruedas} ${H.ruedas===1?'rueda':'ruedas'}; se vuelve útil con algunas semanas de historia.</p>` : ''))}</div>` : '';
-  return `${foco}${selH}${trackH}${topH}<div class="grid inicio">${reg}${kpis}</div><div class="grid g2" style="margin-top:18px">${nuevos}${cart}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
+  // Crème: Seleccionadas con un gatillo concreto cerca (mismo criterio que "armadas" del resumen de Telegram)
+  const CERCA = P.resumen_cerca || 2;
+  const gatillo = a => {
+    const v = a.vcp, s = a.setup_av && a.setup_av.d, c = a.comp && a.comp.d, i = a.inside && a.inside.d;
+    if(v && v.estado==='recien') return {m:'VCP recién rota', e:v.pivot, st:v.stop, d:v.dist};
+    if(v && (v.estado==='armada' || (v.dist!=null && v.dist>=-CERCA && v.dist<=0))) return {m:'VCP '+v.estado, e:v.pivot, st:v.stop, d:v.dist};
+    if(s && s.estado==='rompe') return {m:'Ruptura AVWAP '+s.ancla.toLowerCase(), e:s.entrada, st:s.stop, d:(a.precio/s.entrada-1)*100};
+    if(s && s.estado==='por romper' && (s.entrada/a.precio-1)*100 <= CERCA) return {m:'AVWAP '+s.ancla.toLowerCase()+' por romper', e:s.entrada, st:s.stop, d:(a.precio/s.entrada-1)*100};
+    if(c && c.ruptura) return {m:'Ruptura de compresión', e:c.gatillo, st:c.piso, d:c.dist_gatillo!=null?-c.dist_gatillo:null};
+    if(c && c.es && c.dist_gatillo!=null && c.dist_gatillo <= CERCA) return {m:'Compresión cerca del gatillo', e:c.gatillo, st:c.piso, d:-c.dist_gatillo};
+    if(i && i.n>=1 && i.dist_hi!=null && i.dist_hi <= CERCA) return {m:(i.n>1?i.n+' ':'')+'inside day', e:i.madre_hi, st:i.madre_lo, d:-i.dist_hi};
+    if(a.tc && a.tc.cerca) return {m:a.tc.n+' cierres apretados (TC)', e:null, st:null, d:a.tc.dist};
+    return null;
+  };
+  const crema = sel.map(a=>({a, g:gatillo(a)})).filter(x=>x.g);
+  const cCr = [
+    {h:'', f:r=>`<span class="rk">${r.i+1}</span>`},
+    {h:'Ticker', f:r=>tk(r.a)},
+    TEND,
+    {h:'Gatillo', f:r=>`<b>${esc(r.g.m)}</b>`},
+    {h:'Entrada', n:1, f:r=>pr(r.g.e)},
+    {h:'Stop', n:1, f:r=>pr(r.g.st)},
+    {h:'Riesgo', n:1, f:r=>r.g.e&&r.g.st&&r.g.e>r.g.st ? fmt((r.g.e-r.g.st)/r.g.e*100,1)+'%' : '–'},
+    {h:'Precio vs. gatillo', n:1, f:r=>r.g.d!=null ? `<span class="${cls(r.g.d)}">${pct(r.g.d)}</span>` : '–'},
+    {h:'Score', n:1, f:r=>`<span class="scp">${fmt(r.a.score,0)}</span>`},
+    {h:'Sector', f:r=>`<span class="mut">${esc(r.a.sector)}</span>`},
+  ];
+  const cremaH = `<div class="foco">${card('Crème de la crème', `${crema.length} · Seleccionadas con el gatillo a ${fmt(CERCA,0)}% o menos (o recién roto)`,
+    tabla(cCr, crema.map((x,i)=>({a:x.a, g:x.g, i})), 'Ninguna Seleccionada tiene un gatillo cerca hoy.')
+    + `<p class="nota" style="margin:10px 0 0">Precio vs. gatillo: negativo = falta para la entrada; positivo = ya rompió. Sin entrada definida en TC: mirá el pivot en el gráfico.</p>`)}</div>`;
+  return `${foco}${cremaH}${selH}${trackH}${topH}<div class="grid inicio">${reg}${kpis}</div><div class="grid g2" style="margin-top:18px">${nuevos}${cart}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
     <h2 class="sec">Top 3 del score</h2>${spot}
     <h2 class="sec">Eventos de la semana <small>macro de EE.UU. de impacto y earnings de las acciones del radar · hora Argentina</small></h2>
     ${eventosSemana()}`;
