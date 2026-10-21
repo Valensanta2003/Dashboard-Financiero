@@ -48,11 +48,11 @@ FOCO_RIESGO_MAX = 8.0
 ZONA_COMPRA_MAX = 5.0  # % máximo sobre la entrada para seguir en Lista de foco / Crème (más arriba ya está extendida)
 SCORE_CASTIGO_BANDERA = 5
 # **Pesos del score** (tienen que sumar 100)
-PUNTOS_TENDENCIA = 18
-PUNTOS_RS = 23
-PUNTOS_COMPRESION = 32
-PUNTOS_SETUP = 17
-PUNTOS_FUNDAMENTALES = 10
+PUNTOS_TENDENCIA = 20
+PUNTOS_RS = 25
+PUNTOS_COMPRESION = 35
+PUNTOS_SETUP = 20
+PUNTOS_FUNDAMENTALES = 0  # 0 = como Warren: los fundamentales se muestran pero no suman ni restan al score
 # **Fundamentales CAN SLIM** (suman puntos, nunca excluyen)
 BUSCAR_FUNDAMENTALES = True
 CRECIMIENTO_FUERTE = 25  # % interanual: acelerando y sobre este valor suma todo; solo una de las dos, la mitad
@@ -504,7 +504,7 @@ def fundamentales(tickers, ultimo_reporte):
         e0, e1 = (ge + [None, None])[:2]
         v0, v1 = (gv + [None, None])[:2]
         if v1 is None: v1 = anual_v  # sin el trimestre anterior, se compara contra el crecimiento del último año
-        mitad = PUNTOS_FUNDAMENTALES / 2
+        mitad = (PUNTOS_FUNDAMENTALES or 10) / 2  # si no suman al score, se calculan igual sobre 10 para el sello CAN SLIM
         trim = []
         for k in range(len(c["eps"]) - 1, max(-1, len(c["eps"]) - 5), -1):
             f, rep_, est = c["eps"][k]
@@ -1509,7 +1509,7 @@ def partes_score(mv, rs, comp_d, sav_d, comp_d_rup, ins_d, piv, vcp=None, fund=N
         elif e == "recien": setup += 8 if (vcp["vol_rup"] or 0) >= VOL_RUPTURA else 4
         elif e == "confirmo": setup += 4
     if tc: setup += TC_PUNTOS + (2 if tc["seco"] and tc["cerca"] else 0)
-    fu = (fund["pts_eps"] + fund["pts_ventas"]) if fund else 0.0
+    fu = (fund["pts_eps"] + fund["pts_ventas"]) if (fund and PUNTOS_FUNDAMENTALES > 0) else 0.0
     return {"tend": num(tend, 1), "rs": num(fuer, 1), "contr": num(contr, 1),
             "setup": num(min(setup, 20) / 20 * PUNTOS_SETUP, 1), "fund": num(fu, 1)}
 
@@ -1895,6 +1895,7 @@ b.warn,span.warn{color:var(--warn)}
 .lema .lt{display:flex;flex-direction:column;gap:3px;font-size:13px}.lema .lt b{font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;font-size:12px;color:var(--acc)}
 .lema code{font-family:var(--mono);margin-left:6px}.lema em{font-style:normal;font-weight:800;padding:0 4px;border-radius:4px}
 .lema em.up{background:var(--accsoft)}.lema em.down{background:color-mix(in srgb,var(--down) 15%,transparent)}
+.cs{display:inline-block;margin-left:4px;padding:0 5px;border-radius:5px;font-size:10.5px;font-weight:800;color:#e879a6;border:1px solid color-mix(in srgb,#e879a6 50%,transparent);vertical-align:1px}
 .tvexp{font-size:13px;padding:7px 12px}
 .h200{margin-top:14px}.h200 small{display:block;margin-bottom:4px;font-size:12px}
 svg .ax{font-size:11px;fill:var(--muted);font-family:var(--mono)}
@@ -2135,7 +2136,8 @@ function spark(arr, w=84, h=24){
   return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
 }
 const flags = (a, max=2) => (a.flags||[]).slice(0,max).map(f=>`<span class="fl ${f.tipo}" title="${esc(f.t)}">${esc(f.c)}</span>`).join('');
-const tk = (a, fl=true) => `<span class="tk">${esc(a.t)}</span>${fl ? flags(a) : ''}`;
+const canslim = a => a.fund && ((a.fund.pts_eps||0)+(a.fund.pts_ventas||0)) >= 5 ? '<span class="cs" title="EPS y/o ventas creciendo fuerte o acelerando (CAN SLIM)">C</span>' : '';
+const tk = (a, fl=true) => `<span class="tk">${esc(a.t)}</span>${canslim(a)}${fl ? flags(a) : ''}`;
 const ARR = {2:['▲','s2'],1:['▲','s1'],'-1':['▼','b1'],'-2':['▼','b2']};
 const flecha = (v, t='') => { const x = ARR[v]; return x ? `<span class="ar ${x[1]}" title="${t}">${x[0]}</span>` : `<span class="ar" title="${t}">–</span>`; };
 const xo8 = a => `<span class="x8 ${a.mv>=7?'up':a.mv>=5?'warn':'down'}">${a.mv}/8</span>`;
@@ -2144,7 +2146,8 @@ const tend = a => `<span class="tend">${xo8(a)}<span class="ars">${(a.pend||[]).
 const adrC = v => v==null ? '<span class="mut">s/d</span>' : `<span class="adr${v<1.5?0:v<2.5?1:v<4.5?2:v<6?3:4}">${fmt(v,2)}%</span>`;
 const volx = a => a.vol_pct==null ? '–' : `<span class="${a.vol_pct>0?'up':'mut'}">${pct(a.vol_pct,0)}</span>`;
 const PILARES = [['Tendencia','tend',P.pts.tend,'var(--blue)'],['Fuerza RS','rs',P.pts.rs,'var(--acc)'],['Contracción','contr',P.pts.contr,'var(--violet)'],['Setup','setup',P.pts.setup,'var(--warn)'],['Fundamentales','fund',P.pts.fund,'#e879a6']];
-const pilares = a => (a.partes && a.partes.fund==null && a.tipo!=='accion')
+const PIL = PILARES.filter(x => x[1]!=='fund' || P.pts.fund > 0);
+const pilares = a => P.pts.fund <= 0 ? PIL : (a.partes && a.partes.fund==null && a.tipo!=='accion')
   ? PILARES.filter(x=>x[1]!=='fund').map(([n,k,m,c])=>[n, k, +(m*100/(100-P.pts.fund)).toFixed(1), c]) : PILARES;
 const TEND = {h:'Tendencia', f:r=>tend(r.a)};
 const VOLX = {h:'Vol. vs prom. 50', n:1, f:r=>volx(r.a)};
@@ -2740,7 +2743,8 @@ function bloqueFund(a){
   if(an.length>=2 && an[0][1]>0 && an[an.length-1][1]>0) cagr = (Math.pow(an[an.length-1][1]/an[0][1], 1/(an.length-1))-1)*100;
   const anual = an.length ? `<div class="kv" style="margin-top:10px"><span>EPS anual${F.moneda&&F.moneda!=='USD'?' ('+esc(F.moneda)+')':''}</span><span>${an.map(([y,v])=>`${y}: ${fmt(v,2)}`).join(' · ')}</span>
       <span>Crecimiento compuesto</span><span class="${crecC(cagr)}">${cagr!=null?pct(cagr,0)+' por año':'s/d'} <span class="mut">· CAN SLIM pide ${P.fuerte}%</span></span></div>` : '';
-  return `<h4>Análisis fundamental · ${fmt((F.pts_eps||0)+(F.pts_ventas||0),1)}/${P.pts.fund} pts</h4>
+  const pf = (F.pts_eps||0)+(F.pts_ventas||0);
+  return `<h4>Análisis fundamental · ${P.pts.fund > 0 ? fmt(pf,1)+'/'+P.pts.fund+' pts' : (pf>=5 ? 'CAN SLIM ✓' : 'informativo, no suma al score')}</h4>
     <div class="fgrid">${caja('Crecim. EPS (trim.)', F.eps_g!=null?pct(F.eps_g,0):'s/d', ant(F.eps_g_ant), crecC(F.eps_g))}
       ${caja('Crecim. ventas (trim.)', F.ventas_g!=null?pct(F.ventas_g,0):'s/d', ant(F.ventas_g_ant), crecC(F.ventas_g))}
       ${caja('P/E', F.pe!=null?fmt(F.pe,1)+'x':'s/d')}${caja('% institucional', F.inst!=null?fmt(F.inst,0)+'%':'s/d')}</div>
