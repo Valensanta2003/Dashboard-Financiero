@@ -1883,6 +1883,10 @@ b.warn,span.warn{color:var(--warn)}
 .cartsel{display:inline-flex;gap:6px}.cartsel .chip{padding:3px 10px;font-size:12px}
 .ambas{font-size:11px;font-weight:700;color:var(--warn);white-space:nowrap}
 .dos .card{min-width:0}
+.lema{display:flex;align-items:center;gap:14px;margin-top:10px;padding:8px 12px;border:1px solid var(--line);border-radius:12px;background:var(--card);width:max-content;max-width:100%;flex-wrap:wrap}
+.lema .lt{display:flex;flex-direction:column;gap:3px;font-size:13px}.lema .lt b{font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;font-size:12px;color:var(--acc)}
+.lema code{font-family:var(--mono);margin-left:6px}.lema em{font-style:normal;font-weight:800;padding:0 4px;border-radius:4px}
+.lema em.up{background:var(--accsoft)}.lema em.down{background:color-mix(in srgb,var(--down) 15%,transparent)}
 .tvexp{font-size:13px;padding:7px 12px}
 .h200{margin-top:14px}.h200 small{display:block;margin-bottom:4px;font-size:12px}
 svg .ax{font-size:11px;fill:var(--muted);font-family:var(--mono)}
@@ -2045,7 +2049,7 @@ footer{color:var(--faint);font-size:12.5px;margin-top:40px;max-width:95ch}
   <nav class="rail" id="rail" aria-label="Secciones"></nav>
   <main>
     <header class="top">
-      <div><h1 id="titulo"></h1><p id="sub"></p></div>
+      <div><h1 id="titulo"></h1><p id="sub"></p><div id="lema"></div></div>
       <div class="controles">
         <span class="chipmeta" id="meta"></span>
         <div class="seg" id="tf" role="group" aria-label="Temporalidad">
@@ -2247,6 +2251,25 @@ function eventosSemana(){
   };
   return `<div class="card"><div class="evs">${dias.map(col).join('')}</div>
     <p class="nota" style="margin:10px 0 0">Datos macro de alto (rojo) y medio (ámbar) impacto, sin discursos menores. En earnings, resaltadas las Seleccionadas; PRE = antes de la apertura, POST = después del cierre.</p></div>`;
+}
+function lemaHTML(){
+  // El poder de las pequeñas mejoras: 1% por día durante un año (interés compuesto)
+  const n = 365, w = 230, h = 92, alto = h - 16, base0 = h - 10, linea1 = base0 - alto*0.35;
+  // Escala partida: de 0 a 1 ocupa la franja de abajo y de 1 a 38 la de arriba, para que se vean las dos curvas
+  const y1 = v => v <= 1 ? base0 - v*(base0 - linea1) : linea1 - (Math.min(v, 38) - 1)/37*(linea1 - 6);
+  const sube = [], baja = [];
+  for(let d=0; d<=n; d+=5){ const x = 26 + d/n*(w-36); sube.push(`${x.toFixed(1)},${y1(Math.pow(1.01,d)).toFixed(1)}`); baja.push(`${x.toFixed(1)},${y1(Math.pow(0.99,d)*1).toFixed(1)}`); }
+  const base = y1(1);
+  return `<div class="lema"><div class="lt"><b>The Power of Tiny Gains</b>
+      <span>1% better every day <code>1.01<sup>365</sup> = <em class="up">${fmt(Math.pow(1.01,365),2)}</em></code></span>
+      <span>1% worse every day <code>0.99<sup>365</sup> = <em class="down">${fmt(Math.pow(0.99,365),2)}</em></code></span></div>
+    <svg viewBox="0 0 ${w} ${h+14}" width="${w}" height="${h+14}" aria-label="Mejorar 1% por día durante un año">
+      <line x1="26" y1="6" x2="26" y2="${h-10}" stroke="var(--line2)"/><line x1="26" y1="${h-10}" x2="${w-6}" y2="${h-10}" stroke="var(--line2)"/>
+      <line x1="26" y1="${base}" x2="${w-6}" y2="${base}" stroke="var(--muted)" stroke-dasharray="3 3"/>
+      <text x="20" y="${base+3}" text-anchor="end" class="ax">1</text>
+      <polyline points="${sube.join(' ')}" fill="none" stroke="var(--up)" stroke-width="2"/>
+      <polyline points="${baja.join(' ')}" fill="none" stroke="var(--down)" stroke-width="2"/>
+      <text x="${w-6}" y="${h+4}" text-anchor="end" class="ax">1 año</text></svg></div>`;
 }
 function vInicio(){
   const act = visibles(), tf = S.tf, R = D.meta.regimen;
@@ -2804,7 +2827,8 @@ function ir(p){
 function render(){
   const pg = PAGS.find(x=>x[0]===S.pag);
   $('#titulo').textContent = {inicio: D.meta.nombre || 'Radar'}[pg[0]] || pg[1];
-  $('#sub').textContent = pg[0]==='inicio' && D.meta.lema ? D.meta.lema + ' · ' + pg[2] : pg[2];
+  $('#sub').textContent = pg[2];
+  $('#lema').innerHTML = pg[0]==='inicio' ? lemaHTML() : '';
   $('#vista').innerHTML = VISTAS[S.pag]();
 }
 function seg(id, key){
