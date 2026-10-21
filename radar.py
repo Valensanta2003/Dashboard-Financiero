@@ -1470,17 +1470,19 @@ def eventos_macro():
                     "impacto": "alto" if f["impact"] == "High" else "medio", "est": f.get("forecast") or "", "ant": f.get("previous") or ""})
     return sorted(out, key=lambda x: (x["fecha"], x["hora"]))
 
-def cartelera(diario, tickers, nombres):
+def cartelera(diario, tickers, nombres, mcaps=None):
     """Las que más suben y más bajan hoy entre las acciones líquidas."""
     ch = {t: (diario[t].Close.iloc[-1] / diario[t].Close.iloc[-2] - 1) * 100 for t in tickers if len(diario[t]) > 1}
     orden = sorted(ch, key=lambda t: -ch[t])
-    fila = lambda t: {"t": t, "n": nombres.get(t, t), "chg": num(ch[t], 2), "precio": num(diario[t].Close.iloc[-1], 2)}
+    mc = lambda t: num((mcaps or {}).get(t), 0) if (mcaps or {}).get(t) else None
+    fila = lambda t: {"t": t, "n": nombres.get(t, t), "chg": num(ch[t], 2), "precio": num(diario[t].Close.iloc[-1], 2), "mcap": mc(t)}
+    N = CARTELERA_N * 8  # de más, para que el dashboard pueda filtrar por grandes y seguir mostrando CARTELERA_N
     r = {t: float(rsi(diario[t].Close).iloc[-1]) for t in tickers if len(diario[t]) > 30}
     r = {t: v for t, v in r.items() if np.isfinite(v)}
-    fr = lambda t: {"t": t, "n": nombres.get(t, t), "rsi": num(r[t], 1), "chg": num(ch.get(t), 2)}
-    caro = sorted([t for t in r if r[t] >= RSI_SOBRECOMPRA], key=lambda t: -r[t])[:CARTELERA_N]
-    barato = sorted([t for t in r if r[t] <= RSI_SOBREVENTA], key=lambda t: r[t])[:CARTELERA_N]
-    return {"suben": [fila(t) for t in orden[:CARTELERA_N]], "bajan": [fila(t) for t in orden[::-1][:CARTELERA_N]],
+    fr = lambda t: {"t": t, "n": nombres.get(t, t), "rsi": num(r[t], 1), "chg": num(ch.get(t), 2), "mcap": mc(t)}
+    caro = sorted([t for t in r if r[t] >= RSI_SOBRECOMPRA], key=lambda t: -r[t])[:N]
+    barato = sorted([t for t in r if r[t] <= RSI_SOBREVENTA], key=lambda t: r[t])[:N]
+    return {"suben": [fila(t) for t in orden[:N]], "bajan": [fila(t) for t in orden[::-1][:N]],
             "sobrecompra": [fr(t) for t in caro], "sobreventa": [fr(t) for t in barato]}
 
 # ---------------------------------------------------------------- score
@@ -1682,7 +1684,7 @@ def correr():
     fecha_iso = max(df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto").strftime("%Y-%m-%d")
     top = top_retorno(activos, fecha_iso, spy_c, diario)
     nombres = {t: str((perf.get(t) or {}).get("nombre") or info.at[t, "nombre"]) for t in liquidas}
-    cart = cartelera(diario, liquidas, nombres)
+    cart = cartelera(diario, liquidas, nombres, {t: (perf.get(t) or {}).get("mcap") for t in liquidas})
     macro = eventos_macro()
     print(f"   Eventos macro: {len(macro)}")
     por_semana = rs_semanas(diario)
@@ -1711,7 +1713,7 @@ def correr():
                    "vcp_min": VCP_MIN_CONTRACCIONES, "vcp_ult": VCP_ULTIMA_MAX, "vcp_form": VCP_FORMANDO_MAX, "vcp_dist": VCP_DIST_PIVOT,
                    "vcp_seco": VCP_VOL_SECO, "vcp_dias": VCP_DIAS_RUPTURA, "vcp_seg": VCP_DIAS_SEGUIMIENTO,
                    "vcp_smin": VCP_SEMANAS_MIN, "vcp_smax": VCP_SEMANAS_MAX, "emas_asc": EMAS_ASCENSO,
-                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "rsi_alto": RSI_SOBRECOMPRA, "rsi_bajo": RSI_SOBREVENTA, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS, "top_n": TOP_N,
+                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "rsi_alto": RSI_SOBRECOMPRA, "cart_n": CARTELERA_N, "rsi_bajo": RSI_SOBREVENTA, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS, "top_n": TOP_N,
                    "pts": {"tend": PUNTOS_TENDENCIA, "rs": PUNTOS_RS, "contr": PUNTOS_COMPRESION, "setup": PUNTOS_SETUP, "fund": PUNTOS_FUNDAMENTALES}, "est10": ESTIRADA_EMA10_ADR, "est20": ESTIRADA_EMA20_ADR,
                    "foco_rs": FOCO_RS_MINIMO, "foco_riesgo": FOCO_RIESGO_MAX, "foco_max": FOCO_MAXIMO}},
         "foco": foco, "activos": sorted(activos, key=lambda a: -a["score"])}
@@ -2319,9 +2321,10 @@ function vInicio(){
   const nuevos = card('Nuevos ingresos al Top 30', T && T.nuevos_desde ? 'contra el '+esc(fechaCorta(T.nuevos_desde)) : null,
     T && T.nuevos_desde ? tabla(cNv, nv.map(a=>({a})), 'Ninguna entró al Top 30 desde la rueda anterior.') : '<p class="vacio">Aparece desde la próxima rueda (hace falta el historial de ayer).</p>');
   const C = D.meta.cartelera;
-  const lista = (l, c) => `<div class="cart">${l.map(x=>`<div class="ci ${idx2[x.t]?'en':''}" ${idx2[x.t]?`data-t="${esc(x.t)}" tabindex="0"`:''}><b>${esc(x.t)}</b><span>${esc(x.n)}</span><em class="${c}">${pct(x.chg,1)}</em></div>`).join('')}</div>`;
-  const listaR = (l, c) => l.length ? `<div class="cart">${l.map(x=>`<div class="ci ${idx2[x.t]?'en':''}" ${idx2[x.t]?`data-t="${esc(x.t)}" tabindex="0"`:''}><b>${esc(x.t)}</b><span>${esc(x.n)}</span><em class="${c}">${fmt(x.rsi,1)}</em></div>`).join('')}</div>` : '<p class="vacio">Ninguna hoy.</p>';
-  const cart = C ? card('Cartelera del día', 'acciones líquidas · en verde las que están en el radar',
+  const filt = l => (l||[]).filter(x => !S.grandes || (x.mcap||0) >= 1e10).slice(0, P.cart_n || 6);
+  const lista = (l, c) => `<div class="cart">${filt(l).map(x=>`<div class="ci ${idx2[x.t]?'en':''}" ${idx2[x.t]?`data-t="${esc(x.t)}" tabindex="0"`:''}><b>${esc(x.t)}</b><span>${esc(x.n)}</span><em class="${c}">${pct(x.chg,1)}</em></div>`).join('')}</div>`;
+  const listaR = (l, c) => filt(l).length ? `<div class="cart">${filt(l).map(x=>`<div class="ci ${idx2[x.t]?'en':''}" ${idx2[x.t]?`data-t="${esc(x.t)}" tabindex="0"`:''}><b>${esc(x.t)}</b><span>${esc(x.n)}</span><em class="${c}">${fmt(x.rsi,1)}</em></div>`).join('')}</div>` : '<p class="vacio">Ninguna hoy.</p>';
+  const cart = C ? card('Cartelera del día', S.grandes ? 'solo grandes (≥10 B) · en verde las que están en el radar' : 'acciones líquidas · en verde las que están en el radar',
     `<div class="g2c"><div><h5 class="up">Más suben</h5>${lista(C.suben,'up')}</div><div><h5 class="down">Más bajan</h5>${lista(C.bajan,'down')}</div></div>`
     + (C.sobrecompra ? `<div class="g2c" style="margin-top:14px"><div><h5 style="color:#EF6C00">Sobrecompradas · RSI ${P.rsi_alto}+</h5>${listaR(C.sobrecompra,'rc')}</div><div><h5 style="color:var(--blue)">Sobrevendidas · RSI ${P.rsi_bajo} o menos</h5>${listaR(C.sobreventa,'rv')}</div></div>` : '')) : '';
   const SL = P.sel || {rs:80, mv:7, score:70};
