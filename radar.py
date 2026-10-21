@@ -1917,6 +1917,7 @@ b.warn,span.warn{color:var(--warn)}
 .evr{display:grid;grid-template-columns:52px 1fr auto;gap:6px;align-items:center;font-size:12px;padding:3px 6px;border:1px solid var(--line);border-radius:7px}
 .evr b{font-family:var(--mono)}.evr.rad{border-color:var(--blue);cursor:pointer}.evr.sel{border-color:var(--acc);cursor:pointer}.evr.sel b{color:var(--acc)}
 .evr i{font-style:normal;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px}.evr i.pre{color:var(--warn);background:rgba(244,183,64,.14)}.evr i.post{color:#a78bfa;background:rgba(167,139,250,.16)}
+.evmas{margin-top:4px;padding:3px 10px;font-size:12px;align-self:flex-start}
 .evt.rad{border-color:var(--blue)}.evt.sel{border-color:var(--acc);color:var(--acc)}.evt i{font-style:normal;font-size:9.5px;color:var(--muted);margin-left:4px}
 .cartsel{display:inline-flex;gap:6px}.cartsel .chip{padding:3px 10px;font-size:12px}
 .ambas{font-size:11px;font-weight:700;color:var(--warn);white-space:nowrap}
@@ -2292,7 +2293,7 @@ function eventosSemana(){
     return `<div class="evd ${f===iso(hoy)?'hoy':''}"><div class="evh"><b>${DIAS[d.getDay()]} ${d.getDate()}</b><span class="mut">${m.length+e.length} eventos</span></div>
       ${m.length ? `<h5>Economía EE.UU.</h5>${m.map(x=>`<div class="evm ${x.impacto}"><div><b>${esc(x.titulo)}</b><span class="mut">${esc(x.hora)}</span></div>
         ${x.est||x.ant ? `<small>${x.est?'est. '+esc(x.est):''}${x.est&&x.ant?' · ':''}${x.ant?'ant. '+esc(x.ant):''}</small>` : ''}</div>`).join('')}` : ''}
-      ${e.length ? `<h5>Earnings · ${e.length}</h5><div class="eve">${e.slice(0,15).map(x=>`<div class="evr ${esSel(x.a)?'sel':x.a?'rad':''}" ${x.a?`data-t="${esc(x.t)}" tabindex="0"`:''} title="${esc(x.n)}${x.a?' · en el radar':''}"><b>${esc(x.t)}</b><span class="mut">${x.eps?'EPS est '+esc(x.eps.replace('$','')):''}</span>${x.mom?`<i class="${x.mom==='PRE'?'pre':'post'}">${x.mom}</i>`:'<i></i>'}</div>`).join('')}${e.length>15?`<span class="mut">+${e.length-15} más</span>`:''}</div>` : ''}
+      ${e.length ? `<h5>Earnings · ${e.length}</h5><div class="eve">${e.slice(0, (S.evMas||{})[f] ? e.length : 15).map(x=>`<div class="evr ${esSel(x.a)?'sel':x.a?'rad':''}" ${x.a?`data-t="${esc(x.t)}" tabindex="0"`:''} title="${esc(x.n)}${x.a?' · en el radar':''}"><b>${esc(x.t)}</b><span class="mut">${x.eps?'EPS est '+esc(x.eps.replace('$','')):''}</span>${x.mom?`<i class="${x.mom==='PRE'?'pre':'post'}">${x.mom}</i>`:'<i></i>'}</div>`).join('')}${e.length>15?`<button class="chip evmas" data-evmas="${f}">${(S.evMas||{})[f] ? 'Ver menos' : `Ver las ${e.length-15} restantes`}</button>`:''}</div>` : ''}
       ${!m.length && !e.length ? '<p class="vacio">Sin eventos relevantes.</p>' : ''}</div>`;
   };
   return `<div class="card"><div class="evs">${dias.map(col).join('')}</div>
@@ -2891,6 +2892,7 @@ $('#grandes').addEventListener('click', e => { S.grandes = !S.grandes; e.current
 $('#vista').addEventListener('click', e => {
   const k = e.target.closest('[data-ir]'); if(k){ ir(k.dataset.ir); return; }
   const gt = e.target.closest('[data-gat]'); if(gt){ S.gat = gt.dataset.gat; render(); return; }
+  const em2 = e.target.closest('[data-evmas]'); if(em2){ S.evMas = S.evMas || {}; S.evMas[em2.dataset.evmas] = !S.evMas[em2.dataset.evmas]; render(); return; }
   const cg = e.target.closest('[data-cartg]'); if(cg){ S.cartG = cg.dataset.cartg==='1'; render(); return; }
   const sf = e.target.closest('[data-semf]'); if(sf){ S[sf.dataset.semf] = !S[sf.dataset.semf]; render(); return; }
   const sec = e.target.closest('.sec-t'); if(sec){ S.sector = S.sector===sec.dataset.sec ? null : sec.dataset.sec; render(); return; }
