@@ -82,9 +82,15 @@ CRUCE_SEMANAS = 4  # un cruce de RSI o MACD semanal cuenta si pasó en las últi
 TOP_N = 10        # cuántas del ranking se siguen
 TOP_RUEDAS = 10   # ventana en ruedas para medir el retorno desde que entraron
 # **Régimen de mercado**
+REG_PESO_INDICES = 80     # pesos de cada capa (como Warren: 80 / 30 / 15)
+REG_PESO_AMPLITUD = 30
+REG_PESO_VIX = 15
+REG_DISTRIBUCION_TOPE = 5 # con esta cantidad de días de distribución o más, el índice no puede pasar del 50% de su puntaje
 FTD_SUBA_MIN = 1.25       # % mínimo de suba del índice para contar como follow-through day
 FTD_CORRECCION_MIN = 5.0  # % de caída desde el máximo de 60 ruedas para considerar que hubo corrección
 MOSTRAR_FEAR_GREED = True # Fear & Greed de CNN como dato aparte (no suma al score)
+# **Eventos de la semana** (calendario macro de EE.UU.; solo alto y medio impacto, sin discursos menores)
+EVENTOS_DIAS = 7
 # **Módulos de Inicio y Sectores**
 RSI_SOBRECOMPRA = 70     # RSI 14 diario: desde acá cuenta como sobrecomprada
 RSI_SOBREVENTA = 30      # y hasta acá como sobrevendida
@@ -691,16 +697,20 @@ def regimen(indices, vix, acciones):
     for t in ("SPY", "QQQ"):
         df = indices.get(t)
         if df is None or len(df) < 220: continue
-        c = df.Close; p = c.iloc[-1]; e50, e200 = ema(c, 50), ema(c, 200)
-        s_t = 4 * (p > e50.iloc[-1]) + 4 * (p > e200.iloc[-1]) + 2 * (e50.iloc[-1] > e200.iloc[-1] and e200.iloc[-1] > e200.iloc[-21])
+        c = df.Close; p = c.iloc[-1]; e21, e50, e200 = ema(c, 21), ema(c, 50), ema(c, 200)
+        # Tendencia (10): corto, medio y largo plazo; no alcanza con estar sobre la EMA200
+        s_t = 2 * (p > e21.iloc[-1]) + 3 * (p > e50.iloc[-1]) + 3 * (p > e200.iloc[-1]) \
+            + 2 * (e50.iloc[-1] > e200.iloc[-1] and e200.iloc[-1] > e200.iloc[-21])
         ch, vv = c.pct_change(), df.Volume
         dd = int(((ch <= -0.002) & (vv > vv.shift(1))).iloc[-25:].sum())
-        s_d = max(0, 8 - 2 * max(0, dd - 3))
+        s_d = {0: 8, 1: 8, 2: 7, 3: 5, 4: 3}.get(dd, 0)
         ext = (p - e50.iloc[-1]) / atr(df, 14).iloc[-1]
-        s_e = 7 if 0 <= ext <= 3 else 4 if 0 < ext <= 5 else 1 if ext > 5 else 3
-        pts += s_t + s_d + s_e; mx += 25
-        det.append(f"{t}: tendencia {int(s_t)}/10, {dd} días de distribución en 25 ruedas, {ext:+.1f} ATR de la EMA50")
-    if mx: capas.append({"nombre": "Índices SPY y QQQ", "pts": num(pts, 1), "max": mx, "det": det})
+        s_e = 7 if 0 <= ext <= 3 else 4 if 0 < ext <= 5 else 1 if ext > 5 else 2
+        sub = s_t + s_d + s_e
+        if dd >= REG_DISTRIBUCION_TOPE: sub = min(sub, 12.5)  # distribución activa: tope al 50%
+        pts += sub; mx += 25
+        det.append(f"{t}: tendencia {int(s_t)}/10, {dd} días de distribución en 25 ruedas{' (tope por distribución)' if dd >= REG_DISTRIBUCION_TOPE else ''}, {ext:+.1f} ATR de la EMA50")
+    if mx: capas.append({"nombre": "Índices SPY y QQQ", "pts": num(pts / mx * REG_PESO_INDICES, 1), "max": REG_PESO_INDICES, "det": det})
     acc = [d for d in acciones if len(d) >= 220]
     hist200 = []
     if len(acc) >= 50:
@@ -720,7 +730,7 @@ def regimen(indices, vix, acciones):
         s1 = float(np.clip((p200 - 0.3) / 0.4, 0, 1) * 10)
         s2 = float(np.clip((p50 - 0.3) / 0.4, 0, 1) * 10)
         s3 = nh / (nh + nl) * 10 if nh + nl else 5.0
-        capas.append({"nombre": "Amplitud del universo", "pts": num(s1 + s2 + s3, 1), "max": 30,
+        capas.append({"nombre": "Amplitud del universo", "pts": num((s1 + s2 + s3) / 30 * REG_PESO_AMPLITUD, 1), "max": REG_PESO_AMPLITUD,
                       "det": [f"{pe200:.0%} de las acciones sobre la EMA200 y {ps200:.0%} sobre la SMA200", f"{p50:.0%} sobre la EMA50",
                               f"{nh} nuevos máximos de 52 semanas contra {nl} nuevos mínimos"]})
     if vix is not None and len(vix):
@@ -738,7 +748,7 @@ def regimen(indices, vix, acciones):
         elif rel > 1.15: s -= 4
         s = max(0.0, s)
         lect = "complacencia" if v < 12 else "calma" if v <= 16 else "normal" if v <= 20 else "tensión" if v <= 30 else "pánico"
-        capas.append({"nombre": "Sentimiento (VIX)", "pts": num(s, 1), "max": 20,
+        capas.append({"nombre": "Sentimiento (VIX)", "pts": num(s / 20 * REG_PESO_VIX, 1), "max": REG_PESO_VIX,
                       "det": [f"VIX en {v:.1f}: {lect} · {'+' if rel >= 1 else ''}{(rel - 1) * 100:.0f}% contra su media de 50 ruedas"]})
     if not capas: return None
     total = sum(c["pts"] for c in capas) / sum(c["max"] for c in capas) * 100
@@ -1250,7 +1260,7 @@ def track_seleccionadas(activos, fecha, diario, spy):
             "aciertos": num(gan / len(viejas) * 100, 0) if viejas else None,
             "filas": sorted(filas, key=lambda x: x["entro"], reverse=True)[:40]}
 
-def armar_resumen(activos, fecha, reg, selh, rot, diario):
+def armar_resumen(activos, fecha, reg, selh, rot, diario, macro=None):
     """Panorama del mercado y plan para la rueda siguiente, en HTML de Telegram."""
     f2 = lambda x, d=1: f"{x:,.{d}f}".replace(",", "X").replace(".", ",").replace("X", ".")
     sg = lambda x: ("+" if x > 0 else "") + f2(x, 2) + "%"
@@ -1290,8 +1300,8 @@ def armar_resumen(activos, fecha, reg, selh, rot, diario):
     if rot and rot.get("etfs"):
         lid, mej, deb = [], [], []
         for e in rot["etfs"]:
-            x, y = e["rs"][-1], e["rs"][-1] - e["rs"][-2]
-            (lid if x >= 50 and y >= 0 else mej if x < 50 and y >= 0 else deb if x >= 50 else []).append(e["t"])
+            x, y = e["x"][-1], e["y"][-1]
+            (lid if x >= 0 and y >= 0 else mej if x < 0 and y >= 0 else deb if x >= 0 else []).append(e["t"])
         L += ["", f"<b>Rotación:</b> liderando {', '.join(lid[:8]) or 'ninguno'} · mejorando {', '.join(mej[:6]) or 'ninguno'} · se debilitan {', '.join(deb[:6]) or 'ninguno'}"]
     sel = sorted([a for a in activos if es_seleccionada(a)], key=lambda a: -a["score"])
     L += ["", f"<b>Seleccionadas: {len(sel)}</b>" + (f" · nuevas hoy: {', '.join(selh.get('nuevas', [])[:12])}" if selh and selh.get("nuevas") else "")]
@@ -1306,6 +1316,12 @@ def armar_resumen(activos, fecha, reg, selh, rot, diario):
             if dist <= RESUMEN_CERCA:
                 armadas.append(f"• <b>{a['t']}</b> AVWAP {s_['ancla'].lower()} · entrada {f2(s_['entrada'], 2)} · stop {f2(s_['stop'], 2)} · a {f2(dist, 1)}%")
     L += ["", f"<b>Armadas para mañana ({len(armadas)}):</b>"] + (armadas[:12] or ["Ninguna a menos de " + f2(RESUMEN_CERCA, 0) + "% del gatillo."])
+    if macro:
+        man = (ahora_ar().date() + dt.timedelta(days=1)).isoformat()
+        prox = [m for m in macro if m["fecha"] == man] or [m for m in macro if m["fecha"] > ahora_ar().date().isoformat()][:4]
+        if prox:
+            L += ["", "<b>Macro próxima rueda:</b>"] + [f"• {pd.Timestamp(m['fecha']).strftime('%d-%m')} {m['hora']} {m['titulo']}"
+                                                     + (f" (est. {m['est']}, ant. {m['ant']})" if m['est'] or m['ant'] else "") for m in prox[:6]]
     ev = sorted([a for a in sel if a.get("earn_dias") is not None and 0 <= a["earn_dias"] <= 3], key=lambda a: a["earn_dias"])
     if ev:
         cuando = lambda d: "hoy" if d == 0 else "mañana" if d == 1 else f"en {d} días"
@@ -1385,19 +1401,74 @@ def rs_semanas(diario):
         por_semana.append(pd.Series(crudo).rank(pct=True) * 98 + 1)
     return por_semana
 
-def rotacion(diario, etfs, por_semana):
-    """Series de RS semanal de cada ETF para los cuadrantes."""
-    sem = len(por_semana)
-    arr = {t for t, df in diario.items() if len(df) >= 60}
-    ref = diario.get("SPY")
-    fechas = [ref.index[-1 - 5 * k].strftime("%d-%m") for k in range(sem - 1, -1, -1)] if ref is not None and len(ref) > 5 * sem else []
+def rotacion(diario, etfs, por_semana=None):
+    """Cuadrantes tipo RRG contra el SPY, en semanal.
+    X = fuerza relativa: % de la línea ETF/SPY sobre su media de 10 semanas (0 = igual que el SPY).
+    Y = momentum de esa fuerza: cambio de X en las últimas 4 semanas (positivo = acelera)."""
+    sem = ROTACION_SEMANAS + 1
+    spy = diario.get("SPY")
+    if spy is None: return None
+    w_spy = spy.Close.resample("W-FRI").last()
     out = []
     for t, n in etfs.items():
-        if t == "SPY" or t not in arr: continue
-        serie = [num(x.get(t), 1) if t in x.index else None for x in por_semana]
-        if serie[-1] is None or serie[-2] is None: continue
-        out.append({"t": t, "n": n, "rs": serie})
-    return {"fechas": fechas, "etfs": out}
+        if t == "SPY" or t not in diario: continue
+        w = diario[t].Close.resample("W-FRI").last()
+        rs = (w / w_spy).dropna()
+        if len(rs) < sem + 16: continue
+        x = (rs / rs.rolling(10).mean() - 1) * 100
+        y = x - x.shift(4)
+        out.append({"t": t, "n": n, "x": [num(v, 2) for v in x.iloc[-sem:]], "y": [num(v, 2) for v in y.iloc[-sem:]]})
+    return {"fechas": [f.strftime("%d-%m") for f in w_spy.index[-sem:]], "etfs": out}
+
+MACRO_ES = {
+    "Unemployment Claims": "Pedidos de desempleo", "Non-Farm Employment Change": "Nóminas no agrícolas (NFP)",
+    "Unemployment Rate": "Tasa de desempleo", "Average Hourly Earnings m/m": "Salarios por hora m/m",
+    "ADP Non-Farm Employment Change": "Empleo privado ADP", "JOLTS Job Openings": "Vacantes laborales (JOLTS)",
+    "CPI m/m": "Inflación (IPC) m/m", "CPI y/y": "Inflación (IPC) a/a", "Core CPI m/m": "IPC núcleo m/m",
+    "PPI m/m": "Precios mayoristas (IPP) m/m", "Core PPI m/m": "IPP núcleo m/m",
+    "Core PCE Price Index m/m": "PCE núcleo m/m", "PCE Price Index m/m": "PCE m/m",
+    "Federal Funds Rate": "Decisión de tasa de la Fed", "FOMC Statement": "Comunicado de la Fed",
+    "FOMC Press Conference": "Conferencia de prensa de Powell", "FOMC Meeting Minutes": "Minutas de la Fed",
+    "Fed Chair Powell Speaks": "Habla Powell", "Advance GDP q/q": "PIB (adelanto) t/t", "Prelim GDP q/q": "PIB (preliminar) t/t",
+    "Final GDP q/q": "PIB (final) t/t", "Retail Sales m/m": "Ventas minoristas m/m", "Core Retail Sales m/m": "Ventas minoristas núcleo m/m",
+    "ISM Manufacturing PMI": "ISM manufacturero", "ISM Services PMI": "ISM servicios",
+    "Flash Manufacturing PMI": "PMI manufacturero (S&P, flash)", "Flash Services PMI": "PMI de servicios (S&P, flash)",
+    "Prelim UoM Consumer Sentiment": "Confianza del consumidor Michigan (prelim.)",
+    "Revised UoM Consumer Sentiment": "Confianza del consumidor Michigan (final)",
+    "Prelim UoM Inflation Expectations": "Expectativas de inflación Michigan (prelim.)",
+    "Revised UoM Inflation Expectations": "Expectativas de inflación Michigan (final)",
+    "CB Consumer Confidence": "Confianza del consumidor (Conference Board)", "Durable Goods Orders m/m": "Bienes durables m/m",
+    "Core Durable Goods Orders m/m": "Bienes durables núcleo m/m", "Empire State Manufacturing Index": "Índice manufacturero Empire State",
+    "Philly Fed Manufacturing Index": "Índice manufacturero Fed de Filadelfia",
+}
+
+def eventos_macro():
+    """Datos macro de EE.UU. de alto y medio impacto (calendario de Forex Factory), en hora de Argentina."""
+    import requests
+    hdr = {"User-Agent": "Mozilla/5.0"}
+    filas = []
+    for sem in ("thisweek", "nextweek"):
+        try:
+            r = requests.get(f"https://nfs.faireconomy.media/ff_calendar_{sem}.json", headers=hdr, timeout=20)
+            if r.ok: filas += r.json()
+        except Exception as e:
+            print(f"   ⚠️ Calendario macro ({sem}): {e}")
+    hoy = ahora_ar().date()
+    out, vistos = [], set()
+    for f in filas:
+        if f.get("country") != "USD" or f.get("impact") not in ("High", "Medium"): continue
+        tit = f.get("title", "")
+        # Discursos de miembros de la Fed, subastas y similares: ruido para operar
+        if f["impact"] == "Medium" and any(x in tit for x in ("Speaks", "Auction", "Bond", "Treasury", "Holiday")): continue
+        try: cuando = pd.Timestamp(f["date"]).tz_convert("America/Argentina/Buenos_Aires")
+        except Exception: continue
+        if not (0 <= (cuando.date() - hoy).days <= EVENTOS_DIAS): continue
+        clave = (tit, cuando.isoformat())
+        if clave in vistos: continue
+        vistos.add(clave)
+        out.append({"fecha": cuando.strftime("%Y-%m-%d"), "hora": cuando.strftime("%H:%M"), "titulo": MACRO_ES.get(tit, tit),
+                    "impacto": "alto" if f["impact"] == "High" else "medio", "est": f.get("forecast") or "", "ant": f.get("previous") or ""})
+    return sorted(out, key=lambda x: (x["fecha"], x["hora"]))
 
 def cartelera(diario, tickers, nombres):
     """Las que más suben y más bajan hoy entre las acciones líquidas."""
@@ -1612,6 +1683,8 @@ def correr():
     top = top_retorno(activos, fecha_iso, spy_c, diario)
     nombres = {t: str((perf.get(t) or {}).get("nombre") or info.at[t, "nombre"]) for t in liquidas}
     cart = cartelera(diario, liquidas, nombres)
+    macro = eventos_macro()
+    print(f"   Eventos macro: {len(macro)}")
     por_semana = rs_semanas(diario)
     rot = rotacion(diario, ETFS, por_semana) if INCLUIR_ETFS else None
     for a in activos:
@@ -1619,7 +1692,7 @@ def correr():
     selh = track_seleccionadas(activos, fecha_iso, diario, spy_c)
     resumen = None
     if RESUMEN_DIARIO and ahora_ar().hour >= 18:
-        try: resumen = armar_resumen(activos, fecha_iso, reg, selh, rot, diario)
+        try: resumen = armar_resumen(activos, fecha_iso, reg, selh, rot, diario, macro)
         except Exception as e: print(f"   ⚠️ Resumen: {e}")
     n_al = alertas_telegram(activos, fecha_iso, resumen, (reg or {}).get("ftd"))
     print(f"   Seleccionadas: {sum(es_seleccionada(a) for a in activos)} · alertas enviadas: {n_al}")
@@ -1628,7 +1701,7 @@ def correr():
     fechas = [df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto"] or [hoy]
     datos = {"meta": {
         "fecha_datos": max(fechas).strftime("%d-%m-%Y"), "generado": ahora_ar().strftime("%d-%m-%Y %H:%M"),
-        "n_universo": len(diario), "top": top, "selh": selh, "cartelera": cart, "rotacion": rot, "nombre": NOMBRE_DASHBOARD, "lema": LEMA, "avatar": AVATAR_URL, "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
+        "n_universo": len(diario), "top": top, "selh": selh, "macro": macro, "cartelera": cart, "rotacion": rot, "nombre": NOMBRE_DASHBOARD, "lema": LEMA, "avatar": AVATAR_URL, "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
         "params": {"min_mv": MIN_CRITERIOS_MINERVINI, "sobre_min": PCT_SOBRE_MINIMO_52S, "sobre_min_etf": PCT_SOBRE_MINIMO_52S_ETF, "bajo_max": PCT_DEBAJO_MAXIMO_52S,
                    "rs_min": RS_MINIMO, "precio_min": PRECIO_MINIMO, "exigir_av": EXIGIR_AVWAP,
                    "dist_d": DIST_POR_ROMPER_DIARIO, "dist_w": DIST_POR_ROMPER_SEMANAL,
@@ -1787,6 +1860,13 @@ h2.sec small{color:var(--muted);font-family:var(--ui);text-transform:none;letter
 b.warn,span.warn{color:var(--warn)}
 .ci em.rc{color:#EF6C00}.ci em.rv{color:var(--blue)}
 .expo{color:var(--warn)}
+.evs{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.evd{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0}.evd.hoy{border-color:var(--acc)}
+.evh{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;font-family:var(--mono)}
+.evm{border-left:3px solid var(--warn);padding:4px 8px;margin-bottom:6px;font-size:12.5px;background:var(--card2);border-radius:0 8px 8px 0}
+.evm.alto{border-left-color:var(--down)}.evm div{display:flex;justify-content:space-between;gap:6px}.evm small{color:var(--muted)}
+.eve{display:flex;flex-wrap:wrap;gap:5px}.evt{font-size:12px;font-weight:700;padding:2px 7px;border:1px solid var(--line2);border-radius:7px;cursor:pointer;font-family:var(--mono)}
+.evt.sel{border-color:var(--acc);color:var(--acc)}.evt i{font-style:normal;font-size:9.5px;color:var(--muted);margin-left:4px}
 .tvexp{font-size:13px;padding:7px 12px}
 .h200{margin-top:14px}.h200 small{display:block;margin-bottom:4px;font-size:12px}
 svg .ax{font-size:11px;fill:var(--muted);font-family:var(--mono)}
@@ -1963,6 +2043,7 @@ footer{color:var(--faint);font-size:12.5px;margin-top:40px;max-width:95ch}
           <button data-v="cripto" aria-pressed="false">Cripto</button>
         </div>
         <input type="search" id="q" placeholder="Buscar ticker" aria-label="Buscar ticker">
+        <button class="chip tvexp" id="grandes" aria-pressed="false" title="Solo acciones con market cap de 10.000 M o más (más parecido al universo de Warren y a lo que ofrecen Quantfury/eToro)">Grandes ≥10 B</button>
         <button class="chip tvexp" id="tvexp" title="Baja un .txt con los tickers de esta vista para importar como watchlist en TradingView">Watchlist TV</button>
       </div>
     </header>
@@ -2067,6 +2148,7 @@ function vGatillos(){
 function visibles(conSolo30=false){
   const q = S.q.trim().toLowerCase();
   return D.activos.filter(a => (conSolo30 || !a.sin_av) && (S.tipo==='todo' || a.tipo===S.tipo) && pasaSem(a) &&
+    (!S.grandes || a.tipo!=='accion' || (a.mcap||0) >= 1e10) &&
     (!q || a.t.toLowerCase().includes(q) || (a.nombre||'').toLowerCase().includes(q)));
 }
 function mejorAv(a, tf){
@@ -2130,6 +2212,26 @@ function exportarTV(){
   const l = document.createElement('a'); l.href = u; l.download = nombre; document.body.appendChild(l); l.click(); l.remove(); setTimeout(()=>URL.revokeObjectURL(u), 1000);
 }
 const fechaCorta = f => { const x = /(\d{4})-(\d{2})-(\d{2})/.exec(f||''); return x ? `${+x[3]}-${MES[+x[2]-1]}` : (f||''); };
+function eventosSemana(){
+  const DIAS = ['DOM','LUN','MAR','MIÉ','JUE','VIE','SÁB'];
+  const hoy = new Date(); const iso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const dias = []; for(let i=0; i<8 && dias.length<6; i++){ const d = new Date(hoy.getTime() + i*864e5); if(d.getDay()>0 && d.getDay()<6) dias.push(iso(d)); }
+  const mac = D.meta.macro || [];
+  const ear = D.activos.filter(a=>a.tipo==='accion' && a.earn_prox).map(a=>{ const [dd,mm,yy] = a.earn_prox.split('-'); return {a, f:`${yy}-${mm}-${dd}`}; });
+  const SL = P.sel || {rs:80, mv:7, score:70};
+  const esSel = a => !a.sin_av && a.rs>=SL.rs && a.mv>=SL.mv && a.score>=SL.score;
+  const col = f => {
+    const m = mac.filter(x=>x.fecha===f), e = ear.filter(x=>x.f===f).sort((x,y)=>esSel(y.a)-esSel(x.a) || y.a.score-x.a.score);
+    const d = new Date(f+'T12:00:00');
+    return `<div class="evd ${f===iso(hoy)?'hoy':''}"><div class="evh"><b>${DIAS[d.getDay()]} ${d.getDate()}</b><span class="mut">${m.length+e.length} eventos</span></div>
+      ${m.length ? `<h5>Economía EE.UU.</h5>${m.map(x=>`<div class="evm ${x.impacto}"><div><b>${esc(x.titulo)}</b><span class="mut">${esc(x.hora)}</span></div>
+        ${x.est||x.ant ? `<small>${x.est?'est. '+esc(x.est):''}${x.est&&x.ant?' · ':''}${x.ant?'ant. '+esc(x.ant):''}</small>` : ''}</div>`).join('')}` : ''}
+      ${e.length ? `<h5>Earnings · ${e.length}</h5><div class="eve">${e.slice(0,14).map(x=>`<span class="evt ${esSel(x.a)?'sel':''}" data-t="${esc(x.a.t)}" tabindex="0" title="${esc(x.a.nombre)}${x.a.earn_momento?' · '+esc(x.a.earn_momento):''}">${esc(x.a.t)}${x.a.earn_momento?`<i>${x.a.earn_momento.startsWith('antes')?'PRE':'POST'}</i>`:''}</span>`).join('')}${e.length>14?`<span class="mut">+${e.length-14}</span>`:''}</div>` : ''}
+      ${!m.length && !e.length ? '<p class="vacio">Sin eventos relevantes.</p>' : ''}</div>`;
+  };
+  return `<div class="card"><div class="evs">${dias.map(col).join('')}</div>
+    <p class="nota" style="margin:10px 0 0">Datos macro de alto (rojo) y medio (ámbar) impacto, sin discursos menores. En earnings, resaltadas las Seleccionadas; PRE = antes de la apertura, POST = después del cierre.</p></div>`;
+}
 function vInicio(){
   const act = visibles(), tf = S.tf, R = D.meta.regimen;
   let rom=0; act.forEach(a => { const m = mejorAv(a, tf); if(m && m.estado==='rompe') rom++; });
@@ -2257,44 +2359,47 @@ function vInicio(){
     + (H.ruedas < 5 ? `<p class="nota" style="margin:10px 0 0">El registro arrancó hace ${H.ruedas} ${H.ruedas===1?'rueda':'ruedas'}; se vuelve útil con algunas semanas de historia.</p>` : ''))}</div>` : '';
   return `${foco}${selH}${trackH}${topH}<div class="grid inicio">${reg}${kpis}</div><div class="grid g2" style="margin-top:18px">${nuevos}${cart}</div>${emb ? `<div style="margin-top:16px">${emb}</div>` : ""}
     <h2 class="sec">Top 3 del score</h2>${spot}
-    <h2 class="sec">Earnings próximos <small>7 días · activos que cumplen los requisitos</small></h2>
-    ${card('Calendario', ev.length+(ev.length===1?' reporte':' reportes'), earn)}`;
+    <h2 class="sec">Eventos de la semana <small>macro de EE.UU. de impacto y earnings de las acciones del radar · hora Argentina</small></h2>
+    ${eventosSemana()}`;
 }
 
 /* ---------- Sectores ---------- */
 const CUAD = {lid:['Liderando','var(--up)'], deb:['Debilitándose','var(--warn)'], rez:['Rezagados','var(--down)'], mej:['Mejorando','var(--blue)']};
-const cuad = (rs, d) => rs>=50 ? (d>=0?'lid':'deb') : (d>=0?'mej':'rez');
+const cuad = (x, y) => x>=0 ? (y>=0?'lid':'deb') : (y>=0?'mej':'rez');
 function rotPuntos(k){
-  // k = índice de la semana (1..n-1): ΔRS contra la semana anterior
-  return (D.meta.rotacion.etfs||[]).filter(e=>e.rs[k]!=null && e.rs[k-1]!=null).map(e=>({t:e.t, n:e.n, x:e.rs[k], y:e.rs[k]-e.rs[k-1], prev: k>1 && e.rs[k-2]!=null ? [e.rs[k-1], e.rs[k-1]-e.rs[k-2]] : null}));
+  // k = índice de la semana; la cola une con la semana anterior
+  return (D.meta.rotacion.etfs||[]).filter(e=>e.x[k]!=null && e.y[k]!=null)
+    .map(e=>({t:e.t, n:e.n, x:e.x[k], y:e.y[k], prev: k>0 && e.x[k-1]!=null && e.y[k-1]!=null ? [e.x[k-1], e.y[k-1]] : null}));
 }
 function rotSvg(k){
   const R = D.meta.rotacion, pts = rotPuntos(k);
-  const todos = R.etfs.flatMap(e=>e.rs.slice(1).map((v,i)=>v!=null&&e.rs[i]!=null ? Math.abs(v-e.rs[i]) : 0));
-  const my = Math.max(5, ...todos) * 1.1, w = 640, h = 380, X = x => 14 + x/100*(w-60), Y = y => h/2 - y/my*(h/2 - 26);
+  const ax = Math.max(2, ...R.etfs.flatMap(e=>e.x.filter(v=>v!=null).map(Math.abs))) * 1.08;
+  const ay = Math.max(1, ...R.etfs.flatMap(e=>e.y.filter(v=>v!=null).map(Math.abs))) * 1.08;
+  const w = 640, h = 380, X = x => w/2 + x/ax*(w/2 - 30), Y = y => h/2 - y/ay*(h/2 - 26);
   const q = (x, y, txt, c) => `<text x="${x}" y="${y}" class="qd" fill="${c}">${txt}</text>`;
-  return `<svg viewBox="0 0 ${w} ${h}" width="100%" class="rrg" aria-label="Cuadrantes de rotación">
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" class="rrg" aria-label="Cuadrantes de rotación contra el SPY">
     <rect x="${w/2}" y="0" width="${w/2}" height="${h/2}" fill="var(--up)" opacity=".05"/><rect x="0" y="0" width="${w/2}" height="${h/2}" fill="var(--blue)" opacity=".05"/>
     <rect x="0" y="${h/2}" width="${w/2}" height="${h/2}" fill="var(--down)" opacity=".05"/><rect x="${w/2}" y="${h/2}" width="${w/2}" height="${h/2}" fill="var(--warn)" opacity=".05"/>
-    <line x1="${X(50)}" y1="0" x2="${X(50)}" y2="${h}" class="ej"/><line x1="0" y1="${h/2}" x2="${w}" y2="${h/2}" class="ej"/>
+    <line x1="${w/2}" y1="0" x2="${w/2}" y2="${h}" class="ej"/><line x1="0" y1="${h/2}" x2="${w}" y2="${h/2}" class="ej"/>
     ${q(10,18,'MEJORANDO','var(--blue)')}${q(w-10,18,'LIDERANDO','var(--up)').replace('<text','<text text-anchor="end"')}
     ${q(10,h-8,'REZAGADOS','var(--down)')}${q(w-10,h-8,'DEBILITÁNDOSE','var(--warn)').replace('<text','<text text-anchor="end"')}
     ${pts.map(p=>{ const c = CUAD[cuad(p.x,p.y)][1];
-      return `${p.prev?`<line x1="${X(p.prev[0])}" y1="${Y(p.prev[1])}" x2="${X(p.x)}" y2="${Y(p.y)}" stroke="${c}" opacity=".35"/>`:''}
-      <circle cx="${X(p.x)}" cy="${Y(p.y)}" r="6" fill="${c}" opacity=".85"><title>${esc(p.t)} · ${esc(p.n)} · RS ${fmt(p.x,0)} · ΔRS ${fmt(p.y,1)}</title></circle>
+      return `${p.prev?`<line x1="${X(p.prev[0])}" y1="${Y(p.prev[1])}" x2="${X(p.x)}" y2="${Y(p.y)}" stroke="${c}" stroke-width="2" opacity=".45"/>`:''}
+      <circle cx="${X(p.x)}" cy="${Y(p.y)}" r="6" fill="${c}" opacity=".9"><title>${esc(p.t)} · ${esc(p.n)} · ${p.x>=0?'+':''}${fmt(p.x,1)}% vs SPY · momentum ${p.y>=0?'+':''}${fmt(p.y,1)}</title></circle>
       <text x="${X(p.x)+8}" y="${Y(p.y)+4}" class="et">${esc(p.t)}</text>`; }).join('')}
-    <text x="${w-4}" y="${h/2-4}" text-anchor="end" class="ax">RS →</text><text x="${w/2+4}" y="12" class="ax">ΔRS semanal ↑</text></svg>`;
+    <text x="${w-4}" y="${h/2-4}" text-anchor="end" class="ax">más fuerte que SPY →</text><text x="4" y="${h/2-4}" class="ax">← más débil</text>
+    <text x="${w/2+4}" y="12" class="ax">acelera ↑</text><text x="${w/2+4}" y="${h-22}" class="ax">frena ↓</text></svg>`;
 }
 function rotacionHTML(){
   const R = D.meta.rotacion; if(!R || !(R.etfs||[]).length) return '';
-  const n = R.etfs[0].rs.length - 1, k = S.rotK ?? n;
+  const n = R.etfs[0].x.length - 1, k = S.rotK ?? n;
   const ahora = rotPuntos(n), antes = Object.fromEntries(rotPuntos(n-1).map(p=>[p.t, cuad(p.x,p.y)]));
   const g = {lid:[],deb:[],rez:[],mej:[]}; ahora.forEach(p=>g[cuad(p.x,p.y)].push(p.t));
   const recien = ahora.filter(p=>cuad(p.x,p.y)==='lid' && antes[p.t] && antes[p.t]!=='lid').map(p=>p.t);
   const acel = ahora.slice().sort((a,b)=>b.y-a.y).slice(0,5);
   const lect = `Liderando: ${g.lid.length ? g.lid.join(', ') : 'ninguno'}. Mejorando: ${g.mej.length ? g.mej.join(', ') : 'ninguno'}. `
     + `Se debilitan: ${g.deb.length ? g.deb.join(', ') : 'ninguno'}. ${g.lid.length + g.mej.length > g.deb.length + g.rez.length ? 'Más ETFs ganando fuerza que perdiéndola.' : 'Más ETFs perdiendo fuerza que ganándola.'}`;
-  return `<div class="grid g2r" style="margin-bottom:20px">${card('Cuadrantes de rotación', 'ETFs · RS del universo contra su cambio semanal',
+  return `<div class="grid g2r" style="margin-bottom:20px">${card('Cuadrantes de rotación', 'ETFs contra el SPY · fuerza relativa (X) y su momentum (Y), semanal',
       `<div id="rrg">${rotSvg(k)}</div>
        <div class="rrgc"><button class="chip" id="rplay">${S.rotPlay?'Pausa':'Play'}</button>
        <input type="range" id="rk" min="1" max="${n}" value="${k}" aria-label="Semana"><span class="mut" id="rkf">${esc((R.fechas||[])[k]||'')}</span></div>`)}
@@ -2662,6 +2767,7 @@ seg('tf','tf'); seg('tipo','tipo');
 $('#rail').addEventListener('click', e => { const b = e.target.closest('[data-pag]'); if(b) ir(b.dataset.pag); });
 $('#q').addEventListener('input', e => { S.q = e.target.value; render(); });
 $('#tvexp').addEventListener('click', exportarTV);
+$('#grandes').addEventListener('click', e => { S.grandes = !S.grandes; e.currentTarget.setAttribute('aria-pressed', S.grandes); render(); });
 $('#vista').addEventListener('click', e => {
   const k = e.target.closest('[data-ir]'); if(k){ ir(k.dataset.ir); return; }
   const gt = e.target.closest('[data-gat]'); if(gt){ S.gat = gt.dataset.gat; render(); return; }
@@ -2675,8 +2781,8 @@ $('#vista').addEventListener('click', e => {
   if(e.target.closest('#rplay')){
     S.rotPlay = !S.rotPlay; e.target.closest('#rplay').textContent = S.rotPlay ? 'Pausa' : 'Play';
     clearInterval(S.rotTimer);
-    if(S.rotPlay){ const n = D.meta.rotacion.etfs[0].rs.length - 1; if((S.rotK ?? n) >= n) S.rotK = 1;
-      S.rotTimer = setInterval(()=>{ const n2 = D.meta.rotacion.etfs[0].rs.length - 1; S.rotK = Math.min(n2, (S.rotK ?? n2) + 1); pintarRot(); if(S.rotK>=n2){ S.rotPlay=false; clearInterval(S.rotTimer); const b=$('#rplay'); if(b) b.textContent='Play'; } }, 700); }
+    if(S.rotPlay){ const n = D.meta.rotacion.etfs[0].x.length - 1; if((S.rotK ?? n) >= n) S.rotK = 1;
+      S.rotTimer = setInterval(()=>{ const n2 = D.meta.rotacion.etfs[0].x.length - 1; S.rotK = Math.min(n2, (S.rotK ?? n2) + 1); pintarRot(); if(S.rotK>=n2){ S.rotPlay=false; clearInterval(S.rotTimer); const b=$('#rplay'); if(b) b.textContent='Play'; } }, 700); }
     return;
   }
   const tr = e.target.closest('[data-t]'); if(tr) ficha(tr.dataset.t);
