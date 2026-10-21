@@ -45,6 +45,7 @@ RESUMEN_CERCA = 2.0     # % máximo hasta el pivot o la AVWAP para figurar como 
 FOCO_MAXIMO = 10
 FOCO_RS_MINIMO = 80
 FOCO_RIESGO_MAX = 8.0
+ZONA_COMPRA_MAX = 5.0  # % máximo sobre la entrada para seguir en Lista de foco / Crème (más arriba ya está extendida)
 SCORE_CASTIGO_BANDERA = 5
 # **Pesos del score** (tienen que sumar 100)
 PUNTOS_TENDENCIA = 18
@@ -1089,9 +1090,13 @@ def detectar_vcp(df):
     ult = contr[-1]
     pivot, stop = ult["hi"], ult["lo"]
     vol50 = pd.Series(vo).rolling(50).mean().values
-    # ruptura: primer cierre sobre el pivot después del mínimo de la última contracción
-    b = next((x for x in range(ult["lo_i"] + 1, m)
-              if cl[x] > pivot and vol50[x - 1] and vo[x] >= VOL_RUPTURA * vol50[x - 1]), None)
+    # ruptura: el PRIMER cierre sobre el pivot después del mínimo de la última contracción (con o sin volumen).
+    # El volumen de ruptura se mira en ese día y los 2 siguientes; si no aparece, es una ruptura sin volumen.
+    b = next((x for x in range(ult["lo_i"] + 1, m) if cl[x] > pivot), None)
+    sin_vol_rup = False
+    if b is not None:
+        vx = [vo[x] / vol50[x - 1] for x in range(b, min(m, b + 3)) if vol50[x - 1]]
+        sin_vol_rup = not vx or max(vx) < VOL_RUPTURA
     # secado de volumen: promedio desde el inicio de la última contracción vs. promedio de 50 ruedas previo
     fin_c = (b - 1) if b is not None else m - 1
     ref = vol50[ult["hi_i"]] if not np.isnan(vol50[ult["hi_i"]]) else np.nanmean(vo[:ult["hi_i"] + 1])
@@ -1099,9 +1104,11 @@ def detectar_vcp(df):
     dias = vol_b = None
     if b is not None:
         dias = m - 1 - b
-        vol_b = float(vo[b] / vol50[b - 1]) if b > 0 and vol50[b - 1] else None
+        vx = [float(vo[x] / vol50[x - 1]) for x in range(b, min(m, b + 3)) if vol50[x - 1]]
+        vol_b = max(vx) if vx else None
         if dias > VCP_DIAS_SEGUIMIENTO: return None
         if any(cl[x] < pivot for x in range(b + 1, m)): est = "fallo"
+        elif sin_vol_rup and dias >= 1: est = "sinvol"  # si rompió hoy, el volumen del día todavía se está formando
         elif dias < VCP_DIAS_RUPTURA: est = "recien"
         else: est = "confirmo"
     else:
@@ -1531,6 +1538,7 @@ def lista_foco(activos):
             if not ent or not stop or ent <= stop: continue
             riesgo = (ent - stop) / ent * 100
             if riesgo > FOCO_RIESGO_MAX: continue
+            if (precio / ent - 1) * 100 > ZONA_COMPRA_MAX: continue  # ya se fue de la zona de compra
             out.append({"t": a["t"], "setup": nombre, "entrada": num(ent, 4), "stop": num(stop, 4),
                         "riesgo": num(riesgo, 1), "dist": num((precio / ent - 1) * 100), "score": a["score"]})
             break
@@ -1716,7 +1724,7 @@ def correr():
                    "vcp_min": VCP_MIN_CONTRACCIONES, "vcp_ult": VCP_ULTIMA_MAX, "vcp_form": VCP_FORMANDO_MAX, "vcp_dist": VCP_DIST_PIVOT,
                    "vcp_seco": VCP_VOL_SECO, "vcp_dias": VCP_DIAS_RUPTURA, "vcp_seg": VCP_DIAS_SEGUIMIENTO,
                    "vcp_smin": VCP_SEMANAS_MIN, "vcp_smax": VCP_SEMANAS_MAX, "emas_asc": EMAS_ASCENSO,
-                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "rsi_alto": RSI_SOBRECOMPRA, "resumen_cerca": RESUMEN_CERCA, "cart_n": CARTELERA_N, "rsi_bajo": RSI_SOBREVENTA, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS, "top_n": TOP_N,
+                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "rsi_alto": RSI_SOBRECOMPRA, "zona_compra": ZONA_COMPRA_MAX, "resumen_cerca": RESUMEN_CERCA, "cart_n": CARTELERA_N, "rsi_bajo": RSI_SOBREVENTA, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS, "top_n": TOP_N,
                    "pts": {"tend": PUNTOS_TENDENCIA, "rs": PUNTOS_RS, "contr": PUNTOS_COMPRESION, "setup": PUNTOS_SETUP, "fund": PUNTOS_FUNDAMENTALES}, "est10": ESTIRADA_EMA10_ADR, "est20": ESTIRADA_EMA20_ADR,
                    "foco_rs": FOCO_RS_MINIMO, "foco_riesgo": FOCO_RIESGO_MAX, "foco_max": FOCO_MAXIMO}},
         "foco": foco, "activos": sorted(activos, key=lambda a: -a["score"])}
@@ -2413,7 +2421,7 @@ function vInicio(){
     if(a.tc && a.tc.cerca) return {m:a.tc.n+' cierres apretados (TC)', e:null, st:null, d:a.tc.dist};
     return null;
   };
-  const crema = sel.map(a=>({a, g:gatillo(a)})).filter(x=>x.g);
+  const crema = sel.map(a=>({a, g:gatillo(a)})).filter(x=>x.g && (x.g.d==null || x.g.d <= (P.zona_compra||5)));
   const cCr = [
     {h:'', f:r=>`<span class="rk">${r.i+1}</span>`},
     {h:'Ticker', f:r=>tk(r.a)+ambas(r.a.t)},
