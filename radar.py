@@ -1926,6 +1926,7 @@ b.warn,span.warn{color:var(--warn)}
 .lema .lt{display:flex;flex-direction:column;gap:3px;font-size:13px}.lema .lt b{font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;font-size:12px;color:var(--acc)}
 .lema code{font-family:var(--mono);margin-left:6px}.lema em{font-style:normal;font-weight:800;padding:0 4px;border-radius:4px}
 .lema em.up{background:var(--accsoft)}.lema em.down{background:color-mix(in srgb,var(--down) 15%,transparent)}
+.ern{display:inline-block;margin-left:4px;font-size:11px;font-weight:700;color:var(--warn);white-space:nowrap}
 .cs{display:inline-block;margin-left:4px;padding:0 5px;border-radius:5px;font-size:10.5px;font-weight:800;color:#e879a6;border:1px solid color-mix(in srgb,#e879a6 50%,transparent);vertical-align:1px}
 .tvexp{font-size:13px;padding:7px 12px}
 .h200{margin-top:14px}.h200 small{display:block;margin-bottom:4px;font-size:12px}
@@ -2166,9 +2167,12 @@ function spark(arr, w=84, h=24){
   const c = arr[arr.length-1] >= arr[0] ? 'var(--up)' : 'var(--down)';
   return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
 }
-const flags = (a, max=2) => (a.flags||[]).slice(0,max).map(f=>`<span class="fl ${f.tipo}" title="${esc(f.t)}">${esc(f.c)}</span>`).join('');
+const flags = (a, max=2) => (a.flags||[]).filter(f=>f.k!=='earn').slice(0,max).map(f=>`<span class="fl ${f.tipo}" title="${esc(f.t)}">${esc(f.c)}</span>`).join('');
 const canslim = a => a.fund && ((a.fund.pts_eps||0)+(a.fund.pts_ventas||0)) >= 5 ? '<span class="cs" title="EPS y/o ventas creciendo fuerte o acelerando (CAN SLIM)">C</span>' : '';
-const tk = (a, fl=true) => `<span class="tk">${esc(a.t)}</span>${canslim(a)}${fl ? flags(a) : ''}`;
+// 📅 = presenta balance en los próximos 7 días (en todas las listas)
+const earnD = a => { if(a.earn_dias!=null) return a.earn_dias; const x = (D.meta.earn_cal||[]).find(e=>e.t===a.t); return x ? Math.round((Date.parse(x.fecha+'T12:00:00') - Date.now())/864e5) : null; };
+const earnB = a => { const d = earnD(a); return d!=null && d>=0 && d<=7 ? `<span class="ern" title="Presenta balance ${d===0?'hoy':d===1?'mañana':'en '+d+' días'}">📅 ${d===0?'hoy':d+'d'}</span>` : ''; };
+const tk = (a, fl=true) => `<span class="tk">${esc(a.t)}</span>${canslim(a)}${earnB(a)}${fl ? flags(a) : ''}`;
 const ARR = {2:['▲','s2'],1:['▲','s1'],'-1':['▼','b1'],'-2':['▼','b2']};
 const flecha = (v, t='') => { const x = ARR[v]; return x ? `<span class="ar ${x[1]}" title="${t}">${x[0]}</span>` : `<span class="ar" title="${t}">–</span>`; };
 const xo8 = a => `<span class="x8 ${a.mv>=7?'up':a.mv>=5?'warn':'down'}">${a.mv}/8</span>`;
