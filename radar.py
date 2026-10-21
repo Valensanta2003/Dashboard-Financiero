@@ -1869,6 +1869,7 @@ b.warn,span.warn{color:var(--warn)}
 .evm.alto{border-left-color:var(--down)}.evm div{display:flex;justify-content:space-between;gap:6px}.evm small{color:var(--muted)}
 .eve{display:flex;flex-wrap:wrap;gap:5px}.evt{font-size:12px;font-weight:700;padding:2px 7px;border:1px solid var(--line2);border-radius:7px;cursor:pointer;font-family:var(--mono)}
 .evt.sel{border-color:var(--acc);color:var(--acc)}.evt i{font-style:normal;font-size:9.5px;color:var(--muted);margin-left:4px}
+.cartsel{display:inline-flex;gap:6px}.cartsel .chip{padding:3px 10px;font-size:12px}
 .tvexp{font-size:13px;padding:7px 12px}
 .h200{margin-top:14px}.h200 small{display:block;margin-bottom:4px;font-size:12px}
 svg .ax{font-size:11px;fill:var(--muted);font-family:var(--mono)}
@@ -2321,10 +2322,11 @@ function vInicio(){
   const nuevos = card('Nuevos ingresos al Top 30', T && T.nuevos_desde ? 'contra el '+esc(fechaCorta(T.nuevos_desde)) : null,
     T && T.nuevos_desde ? tabla(cNv, nv.map(a=>({a})), 'Ninguna entró al Top 30 desde la rueda anterior.') : '<p class="vacio">Aparece desde la próxima rueda (hace falta el historial de ayer).</p>');
   const C = D.meta.cartelera;
-  const filt = l => (l||[]).filter(x => !S.grandes || (x.mcap||0) >= 1e10).slice(0, P.cart_n || 6);
+  const cartG = S.cartG ?? S.grandes;
+  const filt = l => (l||[]).filter(x => !cartG || (x.mcap||0) >= 1e10).slice(0, P.cart_n || 6);
   const lista = (l, c) => `<div class="cart">${filt(l).map(x=>`<div class="ci ${idx2[x.t]?'en':''}" ${idx2[x.t]?`data-t="${esc(x.t)}" tabindex="0"`:''}><b>${esc(x.t)}</b><span>${esc(x.n)}</span><em class="${c}">${pct(x.chg,1)}</em></div>`).join('')}</div>`;
   const listaR = (l, c) => filt(l).length ? `<div class="cart">${filt(l).map(x=>`<div class="ci ${idx2[x.t]?'en':''}" ${idx2[x.t]?`data-t="${esc(x.t)}" tabindex="0"`:''}><b>${esc(x.t)}</b><span>${esc(x.n)}</span><em class="${c}">${fmt(x.rsi,1)}</em></div>`).join('')}</div>` : '<p class="vacio">Ninguna hoy.</p>';
-  const cart = C ? card('Cartelera del día', S.grandes ? 'solo grandes (≥10 B) · en verde las que están en el radar' : 'acciones líquidas · en verde las que están en el radar',
+  const cart = C ? card('Cartelera del día', `<span class="cartsel"><button class="chip" data-cartg="0" aria-pressed="${!cartG}">≥1 B</button><button class="chip" data-cartg="1" aria-pressed="${!!cartG}">≥10 B</button></span>`,
     `<div class="g2c"><div><h5 class="up">Más suben</h5>${lista(C.suben,'up')}</div><div><h5 class="down">Más bajan</h5>${lista(C.bajan,'down')}</div></div>`
     + (C.sobrecompra ? `<div class="g2c" style="margin-top:14px"><div><h5 style="color:#EF6C00">Sobrecompradas · RSI ${P.rsi_alto}+</h5>${listaR(C.sobrecompra,'rc')}</div><div><h5 style="color:var(--blue)">Sobrevendidas · RSI ${P.rsi_bajo} o menos</h5>${listaR(C.sobreventa,'rv')}</div></div>` : '')) : '';
   const SL = P.sel || {rs:80, mv:7, score:70};
@@ -2774,6 +2776,7 @@ $('#grandes').addEventListener('click', e => { S.grandes = !S.grandes; e.current
 $('#vista').addEventListener('click', e => {
   const k = e.target.closest('[data-ir]'); if(k){ ir(k.dataset.ir); return; }
   const gt = e.target.closest('[data-gat]'); if(gt){ S.gat = gt.dataset.gat; render(); return; }
+  const cg = e.target.closest('[data-cartg]'); if(cg){ S.cartG = cg.dataset.cartg==='1'; render(); return; }
   const sf = e.target.closest('[data-semf]'); if(sf){ S[sf.dataset.semf] = !S[sf.dataset.semf]; render(); return; }
   const sec = e.target.closest('.sec-t'); if(sec){ S.sector = S.sector===sec.dataset.sec ? null : sec.dataset.sec; render(); return; }
   if(e.target.closest('#solo')){ S.soloComp = !S.soloComp; render(); return; }
