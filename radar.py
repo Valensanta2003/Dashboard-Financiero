@@ -92,6 +92,7 @@ FTD_CORRECCION_MIN = 5.0  # % de caída desde el máximo de 60 ruedas para consi
 MOSTRAR_FEAR_GREED = True # Fear & Greed de CNN como dato aparte (no suma al score)
 # **Eventos de la semana** (calendario macro de EE.UU.; solo alto y medio impacto, sin discursos menores)
 EVENTOS_DIAS = 7
+EVENTOS_EARN_MCAP_MIN = 10_000_000_000  # earnings que se muestran: empresas de este tamaño o más, y todas las del radar
 # **Módulos de Inicio y Sectores**
 RSI_SOBRECOMPRA = 70     # RSI 14 diario: desde acá cuenta como sobrecomprada
 RSI_SOBREVENTA = 30      # y hasta acá como sobrevendida
@@ -1477,6 +1478,30 @@ def eventos_macro():
                     "impacto": "alto" if f["impact"] == "High" else "medio", "est": f.get("forecast") or "", "ant": f.get("previous") or ""})
     return sorted(out, key=lambda x: (x["fecha"], x["hora"]))
 
+def calendario_earnings(radar):
+    """Earnings de la semana desde el calendario de NASDAQ (una consulta por día): empresas grandes y todas las del radar."""
+    import requests
+    out = []
+    hoy = ahora_ar().date()
+    for k in range(EVENTOS_DIAS + 1):
+        d = hoy + dt.timedelta(days=k)
+        if d.weekday() >= 5: continue
+        try:
+            r = requests.get(f"https://api.nasdaq.com/api/calendar/earnings?date={d.isoformat()}", timeout=20,
+                             headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+            filas = ((r.json() or {}).get("data") or {}).get("rows") or []
+        except Exception as e:
+            print(f"   ⚠️ Calendario de earnings {d}: {e}"); continue
+        for f in filas:
+            t = str(f.get("symbol", "")).strip().replace("/", "-").replace(".", "-")
+            try: mcap = float(str(f.get("marketCap", "")).replace("$", "").replace(",", "") or 0)
+            except ValueError: mcap = 0
+            if mcap < EVENTOS_EARN_MCAP_MIN and t not in radar: continue
+            tm = f.get("time") or ""
+            out.append({"fecha": d.isoformat(), "t": t, "n": (f.get("name") or t).strip(), "mcap": mcap,
+                        "mom": "PRE" if "pre" in tm else "POST" if "after" in tm else "", "eps": f.get("epsForecast") or ""})
+    return out
+
 def cartelera(diario, tickers, nombres, mcaps=None):
     """Las que más suben y más bajan hoy entre las acciones líquidas."""
     ch = {t: (diario[t].Close.iloc[-1] / diario[t].Close.iloc[-2] - 1) * 100 for t in tickers if len(diario[t]) > 1}
@@ -1697,7 +1722,8 @@ def correr():
     nombres = {t: str((perf.get(t) or {}).get("nombre") or info.at[t, "nombre"]) for t in liquidas}
     cart = cartelera(diario, liquidas, nombres, {t: (perf.get(t) or {}).get("mcap") for t in liquidas})
     macro = eventos_macro()
-    print(f"   Eventos macro: {len(macro)}")
+    earn_cal = calendario_earnings({a["t"] for a in activos})
+    print(f"   Eventos macro: {len(macro)} · earnings de la semana: {len(earn_cal)}")
     por_semana = rs_semanas(diario)
     rot = rotacion(diario, ETFS, por_semana) if INCLUIR_ETFS else None
     for a in activos:
@@ -1714,7 +1740,7 @@ def correr():
     fechas = [df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto"] or [hoy]
     datos = {"meta": {
         "fecha_datos": max(fechas).strftime("%d-%m-%Y"), "generado": ahora_ar().strftime("%d-%m-%Y %H:%M"),
-        "n_universo": len(diario), "top": top, "selh": selh, "macro": macro, "cartelera": cart, "rotacion": rot, "nombre": NOMBRE_DASHBOARD, "lema": LEMA, "avatar": AVATAR_URL, "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
+        "n_universo": len(diario), "top": top, "selh": selh, "macro": macro, "earn_cal": earn_cal, "cartelera": cart, "rotacion": rot, "nombre": NOMBRE_DASHBOARD, "lema": LEMA, "avatar": AVATAR_URL, "embudo": [[k, n] for k, n in embudo], "n_extra": sum(1 for a in activos if a["sin_av"]), "con30m": con30, "regimen": reg, "demo": bool(globals().get("MODO_DEMO", False)),
         "params": {"min_mv": MIN_CRITERIOS_MINERVINI, "sobre_min": PCT_SOBRE_MINIMO_52S, "sobre_min_etf": PCT_SOBRE_MINIMO_52S_ETF, "bajo_max": PCT_DEBAJO_MAXIMO_52S,
                    "rs_min": RS_MINIMO, "precio_min": PRECIO_MINIMO, "exigir_av": EXIGIR_AVWAP,
                    "dist_d": DIST_POR_ROMPER_DIARIO, "dist_w": DIST_POR_ROMPER_SEMANAL,
@@ -1887,7 +1913,11 @@ b.warn,span.warn{color:var(--warn)}
 .evm{border-left:3px solid var(--warn);padding:4px 8px;margin-bottom:6px;font-size:12.5px;background:var(--card2);border-radius:0 8px 8px 0}
 .evm.alto{border-left-color:var(--down)}.evm div{display:flex;justify-content:space-between;gap:6px}.evm small{color:var(--muted)}
 .eve{display:flex;flex-wrap:wrap;gap:5px}.evt{font-size:12px;font-weight:700;padding:2px 7px;border:1px solid var(--line2);border-radius:7px;cursor:pointer;font-family:var(--mono)}
-.evt.sel{border-color:var(--acc);color:var(--acc)}.evt i{font-style:normal;font-size:9.5px;color:var(--muted);margin-left:4px}
+.eve{flex-direction:column;flex-wrap:nowrap}
+.evr{display:grid;grid-template-columns:52px 1fr auto;gap:6px;align-items:center;font-size:12px;padding:3px 6px;border:1px solid var(--line);border-radius:7px}
+.evr b{font-family:var(--mono)}.evr.rad{border-color:var(--blue);cursor:pointer}.evr.sel{border-color:var(--acc);cursor:pointer}.evr.sel b{color:var(--acc)}
+.evr i{font-style:normal;font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px}.evr i.pre{color:var(--warn);background:rgba(244,183,64,.14)}.evr i.post{color:#a78bfa;background:rgba(167,139,250,.16)}
+.evt.rad{border-color:var(--blue)}.evt.sel{border-color:var(--acc);color:var(--acc)}.evt i{font-style:normal;font-size:9.5px;color:var(--muted);margin-left:4px}
 .cartsel{display:inline-flex;gap:6px}.cartsel .chip{padding:3px 10px;font-size:12px}
 .ambas{font-size:11px;font-weight:700;color:var(--warn);white-space:nowrap}
 .dos .card{min-width:0}
@@ -2248,20 +2278,25 @@ function eventosSemana(){
   const hoy = new Date(); const iso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   const dias = []; for(let i=0; i<8 && dias.length<6; i++){ const d = new Date(hoy.getTime() + i*864e5); if(d.getDay()>0 && d.getDay()<6) dias.push(iso(d)); }
   const mac = D.meta.macro || [];
-  const ear = D.activos.filter(a=>a.tipo==='accion' && a.earn_prox).map(a=>{ const [dd,mm,yy] = a.earn_prox.split('-'); return {a, f:`${yy}-${mm}-${dd}`}; });
+  const idxE = Object.fromEntries(D.activos.map(a=>[a.t,a]));
+  // Calendario de NASDAQ (grandes + radar); si no vino, se usa la fecha de earnings de cada acción del radar
+  const ear = (D.meta.earn_cal && D.meta.earn_cal.length)
+    ? D.meta.earn_cal.map(x=>({f:x.fecha, t:x.t, n:x.n, mom:x.mom, eps:x.eps, mcap:x.mcap, a:idxE[x.t]}))
+    : D.activos.filter(a=>a.tipo==='accion' && a.earn_prox).map(a=>{ const [dd,mm,yy] = a.earn_prox.split('-');
+        return {f:`${yy}-${mm}-${dd}`, t:a.t, n:a.nombre, mom:a.earn_momento?(a.earn_momento.startsWith('antes')?'PRE':'POST'):'', eps:'', mcap:a.mcap||0, a}; });
   const SL = P.sel || {rs:80, mv:7, score:70};
-  const esSel = a => !a.sin_av && a.rs>=SL.rs && a.mv>=SL.mv && a.score>=SL.score;
+  const esSel = a => !!a && !a.sin_av && a.rs>=SL.rs && a.mv>=SL.mv && a.score>=SL.score;
   const col = f => {
-    const m = mac.filter(x=>x.fecha===f), e = ear.filter(x=>x.f===f).sort((x,y)=>esSel(y.a)-esSel(x.a) || y.a.score-x.a.score);
+    const m = mac.filter(x=>x.fecha===f), e = ear.filter(x=>x.f===f).sort((x,y)=>esSel(y.a)-esSel(x.a) || (y.mcap||0)-(x.mcap||0));
     const d = new Date(f+'T12:00:00');
     return `<div class="evd ${f===iso(hoy)?'hoy':''}"><div class="evh"><b>${DIAS[d.getDay()]} ${d.getDate()}</b><span class="mut">${m.length+e.length} eventos</span></div>
       ${m.length ? `<h5>Economía EE.UU.</h5>${m.map(x=>`<div class="evm ${x.impacto}"><div><b>${esc(x.titulo)}</b><span class="mut">${esc(x.hora)}</span></div>
         ${x.est||x.ant ? `<small>${x.est?'est. '+esc(x.est):''}${x.est&&x.ant?' · ':''}${x.ant?'ant. '+esc(x.ant):''}</small>` : ''}</div>`).join('')}` : ''}
-      ${e.length ? `<h5>Earnings · ${e.length}</h5><div class="eve">${e.slice(0,14).map(x=>`<span class="evt ${esSel(x.a)?'sel':''}" data-t="${esc(x.a.t)}" tabindex="0" title="${esc(x.a.nombre)}${x.a.earn_momento?' · '+esc(x.a.earn_momento):''}">${esc(x.a.t)}${x.a.earn_momento?`<i>${x.a.earn_momento.startsWith('antes')?'PRE':'POST'}</i>`:''}</span>`).join('')}${e.length>14?`<span class="mut">+${e.length-14}</span>`:''}</div>` : ''}
+      ${e.length ? `<h5>Earnings · ${e.length}</h5><div class="eve">${e.slice(0,15).map(x=>`<div class="evr ${esSel(x.a)?'sel':x.a?'rad':''}" ${x.a?`data-t="${esc(x.t)}" tabindex="0"`:''} title="${esc(x.n)}${x.a?' · en el radar':''}"><b>${esc(x.t)}</b><span class="mut">${x.eps?'EPS est '+esc(x.eps.replace('$','')):''}</span>${x.mom?`<i class="${x.mom==='PRE'?'pre':'post'}">${x.mom}</i>`:'<i></i>'}</div>`).join('')}${e.length>15?`<span class="mut">+${e.length-15} más</span>`:''}</div>` : ''}
       ${!m.length && !e.length ? '<p class="vacio">Sin eventos relevantes.</p>' : ''}</div>`;
   };
   return `<div class="card"><div class="evs">${dias.map(col).join('')}</div>
-    <p class="nota" style="margin:10px 0 0">Datos macro de alto (rojo) y medio (ámbar) impacto, sin discursos menores. En earnings, resaltadas las Seleccionadas; PRE = antes de la apertura, POST = después del cierre.</p></div>`;
+    <p class="nota" style="margin:10px 0 0">Macro de alto (rojo) y medio (ámbar) impacto, sin discursos menores. Earnings de empresas de 10.000 M o más y de todas las del radar (borde verde = Seleccionada, borde azul = en el radar). PRE = antes de la apertura, POST = después del cierre; EPS est = estimado por los analistas.</p></div>`;
 }
 function lemaHTML(){
   // El poder de las pequeñas mejoras: 1% por día durante un año (interés compuesto)
