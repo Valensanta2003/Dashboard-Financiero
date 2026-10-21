@@ -1720,7 +1720,7 @@ def correr():
                    "pts": {"tend": PUNTOS_TENDENCIA, "rs": PUNTOS_RS, "contr": PUNTOS_COMPRESION, "setup": PUNTOS_SETUP, "fund": PUNTOS_FUNDAMENTALES}, "est10": ESTIRADA_EMA10_ADR, "est20": ESTIRADA_EMA20_ADR,
                    "foco_rs": FOCO_RS_MINIMO, "foco_riesgo": FOCO_RIESGO_MAX, "foco_max": FOCO_MAXIMO}},
         "foco": foco, "activos": sorted(activos, key=lambda a: -a["score"])}
-    html = PLANTILLA.replace("__NOMBRE__", NOMBRE_DASHBOARD).replace("__DATA__", json.dumps(datos, ensure_ascii=False, allow_nan=False, default=str))
+    html = PLANTILLA.replace("__NOMBRE__", NOMBRE_DASHBOARD).replace("__AVATAR__", AVATAR_URL).replace("__DATA__", json.dumps(datos, ensure_ascii=False, allow_nan=False, default=str))
     print(f"Listo en {time.time() - t0:.0f} s")
     return html, datos
 
@@ -1732,6 +1732,14 @@ PLANTILLA = r'''<!doctype html>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <title>__NOMBRE__</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#050607">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="__NOMBRE__">
+<link rel="apple-touch-icon" href="__AVATAR__">
+<link rel="icon" href="__AVATAR__">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -2885,4 +2893,9 @@ if __name__ == "__main__":
     os.makedirs("site", exist_ok=True)
     with open("site/index.html", "w", encoding="utf-8") as f:
         f.write(html)
+    # Para instalarlo en el celular como app ("Agregar a pantalla de inicio")
+    json.dump({"name": NOMBRE_DASHBOARD, "short_name": NOMBRE_DASHBOARD[:12], "start_url": "./", "display": "standalone",
+               "background_color": "#050607", "theme_color": "#050607",
+               "icons": [{"src": AVATAR_URL, "sizes": "400x400", "type": "image/jpeg", "purpose": "any"}]},
+              open("site/manifest.webmanifest", "w", encoding="utf-8"), ensure_ascii=False)
     print("Dashboard escrito en site/index.html")
