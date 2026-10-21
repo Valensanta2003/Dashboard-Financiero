@@ -1648,7 +1648,7 @@ def correr():
                 x, y = ret(c_a, n), ret(d.Close, n)
                 a["etf"][k] = num(x - y, 1) if x is not None and y is not None else None
     n_req = sum(1 for a in activos if not a["sin_av"])
-    embudo.append(("Cumplen todo", n_req))
+    if EXIGIR_AVWAP: embudo.append(("Con AVWAP activa", n_req))
     print(f"   {n_req} cumplen todos los requisitos")
     con30 = bool(ANALIZAR_30M and activos)
     if con30:
@@ -1681,6 +1681,9 @@ def correr():
         a["score"] = num(max(0, sum(v for v in p.values() if v) - a["castigo"]), 1)
         a["calor"] = num(0.6 * a["score"] + 0.4 * a.pop("_r21p"), 1)
     foco = lista_foco(activos)
+    # El embudo termina en lo accionable: score alto y Seleccionadas
+    embudo.append((f"Score ≥ {SEL_SCORE_MIN}", sum(1 for a in activos if not a["sin_av"] and a["score"] >= SEL_SCORE_MIN)))
+    embudo.append(("Seleccionadas", sum(1 for a in activos if es_seleccionada(a))))
     fecha_iso = max(df.index[-1] for t, df in diario.items() if info.at[t, "tipo"] != "cripto").strftime("%Y-%m-%d")
     top = top_retorno(activos, fecha_iso, spy_c, diario)
     nombres = {t: str((perf.get(t) or {}).get("nombre") or info.at[t, "nombre"]) for t in liquidas}
