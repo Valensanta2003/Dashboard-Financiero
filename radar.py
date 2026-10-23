@@ -82,6 +82,7 @@ CRUCE_SEMANAS = 4  # un cruce de RSI o MACD semanal cuenta si pasó en las últi
 # **Retorno del Top del score** (track record entre corridas)
 TOP_N = 10        # cuántas del ranking se siguen
 TOP_RUEDAS = 10   # ventana en ruedas para medir el retorno desde que entraron
+SECTOR_TOP = 10   # cuántas se muestran por sector en la pestaña Sectores (ordenadas por calor)
 # **Régimen de mercado**
 REG_PESO_INDICES = 80     # pesos de cada capa (como Warren: 80 / 30 / 15)
 REG_PESO_AMPLITUD = 30
@@ -363,11 +364,27 @@ def nasdaq_screener():
     print(f"   Screener de NASDAQ: {len(out)} acciones")
     return out
 
+GICS_FUENTES = ("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
+                "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies")
+
+def sectores_gics():
+    """{ticker: sector GICS} de las listas del S&P 500, 400 y 600 (unas 1.500 acciones). Es la clasificación de los ETF
+    sectoriales de SPDR (XLV, XLF, …); el screener de NASDAQ usa la suya y a veces no coincide."""
+    out = {}
+    for url in GICS_FUENTES:
+        try:
+            out.update({fila[0]: fila[2] for fila in _extraer(_tablas_wiki(url))})
+        except Exception as e:
+            print(f"   ⚠️ No pude leer {url.split('/')[-1]} ({e})")
+    print(f"   Sector GICS de {len(out)} acciones (S&P 1500)")
+    return out
+
 def perfiles(tickers, precios):
     """{ticker: {mcap, sector, industria, nombre}}. Market cap del screener de NASDAQ (o Yahoo si falta); sector e industria
     de Yahoo cuando hay caché válido (clasificación más fina), si no de NASDAQ. Yahoo solo se consulta para las que NASDAQ no cubre."""
     from concurrent.futures import ThreadPoolExecutor
     nq = nasdaq_screener()
+    gics = sectores_gics()
     try: cache = json.load(open(ARCHIVO_PERFILES))
     except Exception: cache = {}
     # Un perfil sin market cap ni sector no sirve (Yahoo a veces responde vacío): se vuelve a pedir
@@ -394,16 +411,19 @@ def perfiles(tickers, precios):
         print(f"   {hechos} perfiles nuevos ({len(pedir)} sin respuesta, se reintentan la próxima corrida)")
         try: json.dump(cache, open(ARCHIVO_PERFILES, "w"))
         except Exception: pass
-    out = {}
+    out, distintas = {}, []
     for t in tickers:
         c, n = cache.get(t) or {}, nq.get(t) or {}
         mcap = n.get("mcap")
         if not mcap and c.get("mcap"):
             mcap = c["mcap"] * precios[t] / c["px"] if c.get("px") and precios.get(t) else c["mcap"]
+        # Sector: GICS (S&P 1500) primero, después Yahoo, último NASDAQ
         sec = c.get("sector")
-        sec = SECTORES_ES.get(sec, sec) if sec else n.get("sector")
+        sec = gics.get(t) or (SECTORES_ES.get(sec, sec) if sec else n.get("sector"))
+        if gics.get(t) and n.get("sector") and n["sector"] != gics[t]: distintas.append(f"{t} ({n['sector']} → {gics[t]})")
         if not (mcap or sec): continue
         out[t] = {"mcap": mcap, "sector": sec, "industria": c.get("ind") or n.get("industria"), "nombre": c.get("nom")}
+    if distintas: print(f"   {len(distintas)} acciones pasadas de la clasificación de NASDAQ a GICS: " + ", ".join(distintas[:40]) + (" …" if len(distintas) > 40 else ""))
     return out
 
 def liquida(df):
@@ -1750,7 +1770,7 @@ def correr():
                    "vcp_min": VCP_MIN_CONTRACCIONES, "vcp_ult": VCP_ULTIMA_MAX, "vcp_form": VCP_FORMANDO_MAX, "vcp_dist": VCP_DIST_PIVOT,
                    "vcp_seco": VCP_VOL_SECO, "vcp_dias": VCP_DIAS_RUPTURA, "vcp_seg": VCP_DIAS_SEGUIMIENTO,
                    "vcp_smin": VCP_SEMANAS_MIN, "vcp_smax": VCP_SEMANAS_MAX, "emas_asc": EMAS_ASCENSO,
-                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "rsi_alto": RSI_SOBRECOMPRA, "zona_compra": ZONA_COMPRA_MAX, "resumen_cerca": RESUMEN_CERCA, "cart_n": CARTELERA_N, "rsi_bajo": RSI_SOBREVENTA, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS, "top_n": TOP_N,
+                   "fuertes": ANCLAS_FUERTES, "exigir_rs": EXIGIR_RS, "castigo": SCORE_CASTIGO_BANDERA, "fuerte": CRECIMIENTO_FUERTE, "tc_min": TC_MIN_CIERRES, "tc_rango": TC_RANGO_MAX, "tc_cerca": TC_CERCA_PIVOT, "cruce_sem": CRUCE_SEMANAS, "rsi_alto": RSI_SOBRECOMPRA, "zona_compra": ZONA_COMPRA_MAX, "resumen_cerca": RESUMEN_CERCA, "cart_n": CARTELERA_N, "rsi_bajo": RSI_SOBREVENTA, "sel": {"rs": SEL_RS_MIN, "mv": SEL_MINERVINI_MIN, "score": SEL_SCORE_MIN}, "top_ruedas": TOP_RUEDAS, "top_n": TOP_N, "sector_top": SECTOR_TOP,
                    "pts": {"tend": PUNTOS_TENDENCIA, "rs": PUNTOS_RS, "contr": PUNTOS_COMPRESION, "setup": PUNTOS_SETUP, "fund": PUNTOS_FUNDAMENTALES}, "est10": ESTIRADA_EMA10_ADR, "est20": ESTIRADA_EMA20_ADR,
                    "foco_rs": FOCO_RS_MINIMO, "foco_riesgo": FOCO_RIESGO_MAX, "foco_max": FOCO_MAXIMO}},
         "foco": foco, "activos": sorted(activos, key=lambda a: -a["score"])}
@@ -2149,7 +2169,7 @@ IC.gatillos = '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>';
 const ico = k => `<svg viewBox="0 0 24 24" aria-hidden="true">${IC[k]}</svg>`;
 const PAGS = [
   ['inicio','Inicio','Panorama del mercado y lo más destacado del día.'],
-  ['sectores','Sectores','Las 5 más calientes de cada sector. El calor combina el score (60%) con el retorno del último mes relativo al universo (40%).'],
+  ['sectores','Sectores','Las más calientes de cada sector (clasificación GICS, la de los ETF XL*). El calor combina el score (60%) con el retorno del último mes relativo al universo (40%).'],
   ['vcp','VCP','Bases con contracciones de volatilidad cada vez más chicas y volumen que se seca (Minervini). El pivot es el máximo de la última contracción.'],
   ['gatillos','Gatillos','Todo lo que puede disparar una entrada: setups, compresión, inside y episodic pivots, con filtros de RSI y MACD semanal.'],
 ];
@@ -2553,7 +2573,7 @@ function vSectores(){
     {h:'1 mes', n:1, f:r=>`<span class="${cls(r.a.ret21)}">${pct(r.a.ret21,1)}</span>`},
   ];
   const lista = S.sector ? secs.filter(x=>x.s===S.sector) : secs;
-  return `${rotacionHTML()}${franja}<div class="grid gauto">${lista.map(x => card(esc(x.s), x.l.length+' en total', tabla(cols, x.l.slice(0,5).map((a,i)=>({a,i})), ''))).join('')}</div>`;
+  return `${rotacionHTML()}${franja}<div class="grid gauto">${lista.map(x => card(esc(x.s), x.l.length+' en total', tabla(cols, x.l.slice(0,P.sector_top||10).map((a,i)=>({a,i})), ''))).join('')}</div>`;
 }
 
 /* ---------- AVWAP ---------- */
